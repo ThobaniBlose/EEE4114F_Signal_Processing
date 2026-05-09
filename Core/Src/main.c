@@ -19,10 +19,12 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include <string.h>
+#include "ws23_replay_segment.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include <string.h>
+#include <stdio.h>
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -70,7 +72,32 @@ TIM_HandleTypeDef htim4;
 TIM_HandleTypeDef htim15;
 
 /* USER CODE BEGIN PV */
+#define FS              100.0f
+#define SEG_LEN         1024U             /* real samples per segment          */
+#define DFT_LEN         4096U             /* zero-padded DFT length            */
+#define HOP_LEN         (SEG_LEN / 2U)   /* 50% overlap                       */
+#define WP_N_SEG_DBG    10U               /* print every N segments            */
 
+static float eta[SEG_LEN];
+static float hann_win[SEG_LEN];
+static float windowed[SEG_LEN];
+static float psd_accum[DFT_LEN / 2U + 1U];
+
+static uint32_t k_lo         = 0U;
+static uint32_t k_hi         = 0U;
+static float    hann_pwr     = 0.0f;
+static float    window_sum   = 0.0f;
+static uint32_t seg_count    = 0U;
+static uint32_t sample_index = 0U;
+
+volatile float eta_mean = 0.0f;
+volatile float eta_rms  = 0.0f;
+volatile float eta_max  = 0.0f;
+volatile float eta_min  = 0.0f;
+volatile float wv_Hm0   = 0.0f;
+volatile float wv_Tp    = 0.0f;
+volatile float wv_Tm01  = 0.0f;
+volatile float wv_Tm02  = 0.0f;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -102,7 +129,22 @@ static void MX_USB_OTG_FS_USB_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static void init_hann_window(void)
+{
+    float wsum2 = 0.0f;
+    window_sum  = 0.0f;
+    for (uint32_t n = 0; n < SEG_LEN; n++) {
+        hann_win[n] = 0.5f * (1.0f - cosf(2.0f * (float)M_PI
+                                           * (float)n / (float)(SEG_LEN - 1U)));
+        window_sum += hann_win[n];
+        wsum2      += hann_win[n] * hann_win[n];
+    }
+    hann_pwr = wsum2 / (float)SEG_LEN;   /* ≈ 0.375 — power correction factor */
 
+    float df = FS / (float)DFT_LEN;   /* 100/4096 = 0.0244 Hz per bin */
+    k_lo = (uint32_t)ceilf (0.04f / df);   /* ≈ k=2  → 0.049 Hz */
+    k_hi = (uint32_t)floorf(0.50f / df);   /* ≈ k=20 → 0.488 Hz */
+}
 /* USER CODE END 0 */
 
 /**
@@ -137,37 +179,144 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_ADC1_Init();
-  MX_CAN1_Init();
-  MX_COMP1_Init();
-  MX_I2C1_Init();
-  MX_I2C2_SMBUS_Init();
-  MX_LPUART1_UART_Init();
-  MX_USART2_UART_Init();
-  MX_USART3_UART_Init();
-  MX_SAI1_Init();
-  MX_SAI2_Init();
-  MX_SDMMC1_SD_Init();
-  MX_SPI1_Init();
-  MX_SPI3_Init();
-  MX_TIM1_Init();
-  MX_TIM2_Init();
-  MX_TIM3_Init();
-  MX_TIM4_Init();
-  MX_TIM15_Init();
-  MX_USB_OTG_FS_USB_Init();
-  /* USER CODE BEGIN 2 */
+  MX_LPUART1_UART_Init();   /* ST-LINK virtual COM port — needed for UART output */
 
+  /* The peripherals below are not needed for the current test.
+   * They are commented out to prevent any failed init from locking
+   * up the MCU in Error_Handler() before the main loop is reached.
+   * Re-enable one at a time once the baseline is confirmed working. */
+  // MX_ADC1_Init();
+  // MX_CAN1_Init();
+  // MX_COMP1_Init();
+  // MX_I2C1_Init();
+  // MX_I2C2_SMBUS_Init();
+  // MX_USART2_UART_Init();
+  // MX_USART3_UART_Init();
+  // MX_SAI1_Init();
+  // MX_SAI2_Init();
+  // MX_SDMMC1_SD_Init();   /* requires SD card inserted — will fault without one */
+  // MX_SPI1_Init();
+  // MX_SPI3_Init();
+  // MX_TIM1_Init();
+  // MX_TIM2_Init();
+  // MX_TIM3_Init();
+  // MX_TIM4_Init();
+  // MX_TIM15_Init();
+  // MX_USB_OTG_FS_USB_Init();
+  /* USER CODE BEGIN 2 */
+  init_hann_window();
+  char hello[] = "--- Wave processor ready ---\r\n";
+  HAL_UART_Transmit(&hlpuart1, (uint8_t*)hello, strlen(hello), HAL_MAX_DELAY);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-  char msg[] = "STM running 115200 8bit...\r\n";
+  char buf[128];
+  uint32_t n;
+  float sum, sum_sq;
+
   while (1)
   {
-	  HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7);
-	  HAL_UART_Transmit(&hlpuart1, (uint8_t*)msg, strlen(msg), HAL_MAX_DELAY);
-	  HAL_Delay(1000);
+    /* 1) Fill segment from synthetic stream with 50% hop */
+    for (n = 0; n < SEG_LEN; n++) {
+      float t = (float)(sample_index + n) / FS;
+      eta[n] = 0.08f * sinf(2.0f * (float)M_PI * 0.12f * t)
+             + 0.04f * sinf(2.0f * (float)M_PI * 0.18f * t + 0.7f)
+             + 0.02f * sinf(2.0f * (float)M_PI * 0.26f * t + 1.4f);
+    }
+    sample_index += HOP_LEN;   /* advance by 50% for next segment */
+
+    /* 2) Remove mean */
+    sum = 0.0f;
+    for (n = 0; n < SEG_LEN; n++) sum += eta[n];
+    eta_mean = sum / (float)SEG_LEN;
+    for (n = 0; n < SEG_LEN; n++) eta[n] -= eta_mean;
+
+    /* 3) Apply Hann window + track stats */
+    sum_sq  = 0.0f;
+    eta_max = eta[0];
+    eta_min = eta[0];
+    for (n = 0; n < SEG_LEN; n++) {
+      windowed[n] = eta[n] * hann_win[n];
+      sum_sq += eta[n] * eta[n];
+      if (eta[n] > eta_max) eta_max = eta[n];
+      if (eta[n] < eta_min) eta_min = eta[n];
+    }
+    eta_rms = sqrtf(sum_sq / (float)SEG_LEN);
+
+    /* 4) Zero-padded DFT over wave-band bins → accumulate PSD
+     *    step uses DFT_LEN for finer frequency grid (df = fs/DFT_LEN)
+     *    inner loop still runs over SEG_LEN real samples only */
+    for (uint32_t k = k_lo; k <= k_hi; k++) {
+      float re = 0.0f, im = 0.0f;
+      float step = 2.0f * (float)M_PI * (float)k / (float)DFT_LEN;
+      for (n = 0; n < SEG_LEN; n++) {
+        re += windowed[n] * cosf(step * (float)n);
+        im -= windowed[n] * sinf(step * (float)n);
+      }
+      psd_accum[k] += 2.0f * (re*re + im*im)
+                      / ((float)SEG_LEN * hann_pwr * FS);
+    }
+    seg_count++;
+
+    /* 5) Every WP_N_SEG_DBG segments: compute averaged params and print */
+    if ((seg_count % WP_N_SEG_DBG) == 0U) {
+      float df = FS / (float)DFT_LEN;
+      float m0 = 0.0f, m1 = 0.0f, m2 = 0.0f;
+      float S_peak = 0.0f;
+      uint32_t k_peak = k_lo;
+
+      /* Spectral moments + find peak bin */
+      for (uint32_t k = k_lo; k <= k_hi; k++) {
+        float f_k = (float)k * df;
+        float S_k = psd_accum[k] / (float)seg_count;
+        m0 += S_k * df;
+        m1 += f_k * S_k * df;
+        m2 += f_k * f_k * S_k * df;
+        if (S_k > S_peak) { S_peak = S_k; k_peak = k; }
+      }
+
+      /* Parabolic interpolation for Tp — resolves peak between bins */
+      float f_peak_interp;
+      if (k_peak > k_lo && k_peak < k_hi) {
+        float Sm1   = psd_accum[k_peak - 1U] / (float)seg_count;
+        float S0    = psd_accum[k_peak]       / (float)seg_count;
+        float Sp1   = psd_accum[k_peak + 1U] / (float)seg_count;
+        float denom = 2.0f * S0 - Sm1 - Sp1;
+        float delta = (denom > 1e-12f) ? 0.5f * (Sp1 - Sm1) / denom : 0.0f;
+        f_peak_interp = ((float)k_peak + delta) * df;
+      } else {
+        f_peak_interp = (float)k_peak * df;
+      }
+
+      wv_Hm0  = 4.0f * sqrtf(m0);
+      wv_Tp   = (f_peak_interp > 0.0f) ? 1.0f / f_peak_interp : 0.0f;
+      wv_Tm01 = (m1 > 0.0f) ? m0 / m1 : 0.0f;
+      wv_Tm02 = (m2 > 0.0f) ? sqrtf(m0 / m2) : 0.0f;
+
+      snprintf(buf, sizeof(buf),
+               "[seg=%lu] Hm0=%.4f m  Tp=%.2f s  Tm01=%.2f s  Tm02=%.2f s\r\n",
+               (unsigned long)seg_count,
+               (double)wv_Hm0, (double)wv_Tp,
+               (double)wv_Tm01, (double)wv_Tm02);
+      HAL_UART_Transmit(&hlpuart1, (uint8_t*)buf, strlen(buf), HAL_MAX_DELAY);
+
+      /* One-time PSD bin dump at seg=10 to diagnose Tp */
+      if (seg_count == WP_N_SEG_DBG) {
+        char hdr[] = "--- PSD bins ---\r\n";
+        HAL_UART_Transmit(&hlpuart1, (uint8_t*)hdr, strlen(hdr), HAL_MAX_DELAY);
+        for (uint32_t k = k_lo; k <= k_hi; k++) {
+          float f_k = (float)k * (FS / (float)DFT_LEN);
+          float S_k = psd_accum[k] / (float)seg_count;
+          snprintf(buf, sizeof(buf), "  k=%lu  f=%.4f Hz  S=%.6e\r\n",
+                   (unsigned long)k, (double)f_k, (double)S_k);
+          HAL_UART_Transmit(&hlpuart1, (uint8_t*)buf, strlen(buf), HAL_MAX_DELAY);
+        }
+      }
+    }
+
+    HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7);
+    /* No delay — run segments as fast as possible */
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -225,7 +374,7 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_1) != HAL_OK)
   {
     Error_Handler();
   }
@@ -342,8 +491,8 @@ static void MX_CAN1_Init(void)
   hcan1.Init.Prescaler = 16;
   hcan1.Init.Mode = CAN_MODE_NORMAL;
   hcan1.Init.SyncJumpWidth = CAN_SJW_1TQ;
-  hcan1.Init.TimeSeg1 = CAN_BS1_13TQ;  /* total TQ = 1+13+2 = 16, valid */
-  hcan1.Init.TimeSeg2 = CAN_BS2_2TQ;
+  hcan1.Init.TimeSeg1 = CAN_BS1_1TQ;
+  hcan1.Init.TimeSeg2 = CAN_BS2_1TQ;
   hcan1.Init.TimeTriggeredMode = DISABLE;
   hcan1.Init.AutoBusOff = DISABLE;
   hcan1.Init.AutoWakeUp = DISABLE;
@@ -774,8 +923,10 @@ static void MX_SDMMC1_SD_Init(void)
   hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
   hsd1.Init.ClockDiv = 0;
   hsd1.Init.Transceiver = SDMMC_TRANSCEIVER_DISABLE;
-  /* SD card init is non-fatal — card may not be present */
-  HAL_SD_Init(&hsd1);
+  if (HAL_SD_Init(&hsd1) != HAL_OK)
+  {
+    Error_Handler();
+  }
   /* USER CODE BEGIN SDMMC1_Init 2 */
 
   /* USER CODE END SDMMC1_Init 2 */
