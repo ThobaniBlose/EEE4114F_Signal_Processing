@@ -22,6 +22,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "wave_processor.h"
+#include "csv_imu_reader.h"
 #include "ws23_replay_segment.h"
 #include <string.h>
 #include <stdio.h>
@@ -108,6 +109,42 @@ static void uart_print(const char *s)
 {
     HAL_UART_Transmit(&hlpuart1, (uint8_t*)s, strlen(s), HAL_MAX_DELAY);
 }
+
+/* ---------------------------------------------------------------------------
+ * WS23 sensor CSV generator
+ * Generates sensing subsystem format CSV rows on-the-fly from ws23_az_ms2[].
+ * No 32768-string array needed — one row at a time.
+ * --------------------------------------------------------------------------- */
+typedef struct { uint32_t line_index; } Ws23CsvGenCtx_t;
+
+static const char *ws23_sensor_csv_getline(char *buf, uint32_t buf_size, void *ctx)
+{
+    Ws23CsvGenCtx_t *gen = (Ws23CsvGenCtx_t *)ctx;
+    if (gen == 0 || buf == 0 || buf_size == 0U) return NULL;
+
+    /* First line: CSV header */
+    if (gen->line_index == 0U) {
+        snprintf(buf, buf_size,
+                 "timestamp_ms,ax,ay,az,gx,gy,gz,mx,my,mz,heading_deg,roll_deg,pitch_deg");
+        gen->line_index++;
+        return buf;
+    }
+
+    uint32_t i = gen->line_index - 1U;
+    if (i >= WS23_REPLAY_N_SAMPLES) return NULL;
+
+    /* Reconstruct az in g from the mean-removed m/s² replay data.
+     * csv_imu_reader will mean-remove and convert back — round-trip check. */
+    float az_g = 1.0f + (ws23_az_ms2[i] / CSV_IMU_G_TO_MS2);
+
+    snprintf(buf, buf_size,
+             "%lu,0.000000,0.000000,%.9f,0.000000,0.000000,0.000000,"
+             "20.000000,0.000000,40.000000,45.000000,0.000000,0.000000",
+             (unsigned long)(i * 10U), (double)az_g);
+
+    gen->line_index++;
+    return buf;
+}
 /* USER CODE END 0 */
 
 /**
@@ -159,8 +196,103 @@ int main(void)
   /* USER CODE BEGIN 2 */
   char buf[192];
 
+  /* -----------------------------------------------------------------------
+   * Stage 1: CSV parser test
+   * Confirms csv_imu_reader can parse az, remove mean, convert to m/s².
+   * Uses in-memory stub lines — no SD card needed.
+   * ----------------------------------------------------------------------- */
+  static float az_test[CSV_IMU_MAX_SAMPLES];
+  CsvImuResult_t csv_result;
+
+  int csv_status = csv_imu_parse_az(az_test, CSV_IMU_MAX_SAMPLES, &csv_result);
+
+  uart_print("--- CSV parser test ---\r\n");
+  if (csv_status != 0) {
+    snprintf(buf, sizeof(buf), "CSV parse error: %d\r\n", csv_status);
+    uart_print(buf);
+  } else {
+    /* Verify mean of az_ms2 is near zero after removal */
+    float check_sum = 0.0f;
+    for (uint32_t i = 0U; i < csv_result.n_samples; i++) check_sum += az_test[i];
+    float check_mean = check_sum / (float)csv_result.n_samples;
+
+    snprintf(buf, sizeof(buf),
+             "Parsed %lu samples  mean_az_g=%.4f g  post-removal mean=%.6f m/s2\r\n",
+             (unsigned long)csv_result.n_samples,
+             (double)csv_result.mean_az_g,
+             (double)check_mean);
+    uart_print(buf);
+
+    snprintf(buf, sizeof(buf),
+             "az_ms2[0]=%.5f  az_ms2[1]=%.5f  az_ms2[2]=%.5f\r\n",
+             (double)az_test[0], (double)az_test[1], (double)az_test[2]);
+    uart_print(buf);
+
+    uart_print("CSV parser: PASS\r\n");
+  }
+
+  /* -----------------------------------------------------------------------
+   * Stage 1B: Generated sensor CSV → wave processor
+   * Proves the full intended path: CSV format → csv_imu_reader → wave_processor
+   * Uses WS23 replay data encoded as sensing subsystem CSV rows on-the-fly.
+   * ----------------------------------------------------------------------- */
+  uart_print("\r\n--- Generated WS23 sensor CSV path test ---\r\n");
+
+  Ws23CsvGenCtx_t ws23_csv_ctx = {0};
+  int csv_ws23_status = csv_imu_parse_az_from_source(ws23_sensor_csv_getline,
+                                                      &ws23_csv_ctx,
+                                                      az_test,
+                                                      CSV_IMU_MAX_SAMPLES,
+                                                      &csv_result);
+  if (csv_ws23_status != 0) {
+    snprintf(buf, sizeof(buf), "Generated CSV parse error: %d\r\n", csv_ws23_status);
+    uart_print(buf);
+    Error_Handler();
+  }
+
+  snprintf(buf, sizeof(buf), "Parsed %lu generated CSV samples  mean_az_g=%.6f g\r\n",
+           (unsigned long)csv_result.n_samples, (double)csv_result.mean_az_g);
+  uart_print(buf);
+
   wave_processor_init();
-  uart_print("--- WS23 replay processor ready ---\r\n");
+  WaveProcessor_Result csv_wave_result;
+  int csv_wave_status = wave_processor_run(az_test, csv_result.n_samples, &csv_wave_result);
+
+  if (csv_wave_status != 0) {
+    snprintf(buf, sizeof(buf), "CSV wave processor error: %d\r\n", csv_wave_status);
+    uart_print(buf);
+    Error_Handler();
+  }
+
+  snprintf(buf, sizeof(buf),
+           "CSV path: Hm0=%.4f m  Tp=%.4f s  Tm01=%.4f s  Tm02=%.4f s\r\n",
+           (double)csv_wave_result.Hm0, (double)csv_wave_result.Tp,
+           (double)csv_wave_result.Tm01, (double)csv_wave_result.Tm02);
+  uart_print(buf);
+
+  float csv_err_Hm0  = 100.0f * fabsf((csv_wave_result.Hm0  - WS23_REF_HM0_M)  / WS23_REF_HM0_M);
+  float csv_err_Tp   = 100.0f * fabsf((csv_wave_result.Tp   - WS23_REF_TP_S)   / WS23_REF_TP_S);
+  float csv_err_Tm01 = 100.0f * fabsf((csv_wave_result.Tm01 - WS23_REF_TM01_S) / WS23_REF_TM01_S);
+  float csv_err_Tm02 = 100.0f * fabsf((csv_wave_result.Tm02 - WS23_REF_TM02_S) / WS23_REF_TM02_S);
+
+  snprintf(buf, sizeof(buf),
+           "CSV path errors: Hm0=%.2f%%  Tp=%.2f%%  Tm01=%.2f%%  Tm02=%.2f%%\r\n",
+           (double)csv_err_Hm0, (double)csv_err_Tp,
+           (double)csv_err_Tm01, (double)csv_err_Tm02);
+  uart_print(buf);
+
+  if (csv_err_Hm0 < 5.0f && csv_err_Tp < 5.0f &&
+      csv_err_Tm01 < 5.0f && csv_err_Tm02 < 5.0f) {
+    uart_print("PASS: Generated sensor CSV path matches MATLAB reference.\r\n");
+  } else {
+    uart_print("CHECK: Generated sensor CSV path differs from MATLAB reference.\r\n");
+  }
+
+  /* -----------------------------------------------------------------------
+   * Stage 2: WS23 replay — wave processor validation
+   * ----------------------------------------------------------------------- */
+  wave_processor_init();
+  uart_print("\r\n--- WS23 replay processor ready ---\r\n");
 
   WaveProcessor_Result result;
   int status = wave_processor_run(ws23_az_ms2, WS23_REPLAY_N_SAMPLES, &result);

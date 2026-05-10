@@ -4,65 +4,96 @@
 #include <stdint.h>
 
 /* ---------------------------------------------------------------------------
- * CSV IMU reader — adapter between Batsi's SD card CSV output and the
+ * CSV IMU reader — adapter between the sensing subsystem SD card CSV output and the
  * wave_processor module.
  *
  * Expected CSV format (S001_IMU.CSV):
  *   timestamp_ms, ax, ay, az, gx, gy, gz, mx, my, mz, heading_deg, roll_deg, pitch_deg
  *
- * Column indices (0-based):
- *   0  = timestamp_ms
- *   1  = ax [g]
- *   2  = ay [g]
- *   3  = az [g]   <-- used for vertical wave processing
- *   4  = gx [deg/s]
- *   5  = gy [deg/s]
- *   6  = gz [deg/s]
- *   7  = mx
- *   8  = my
- *   9  = mz
- *   10 = heading_deg
- *   11 = roll_deg
- *   12 = pitch_deg
+ * az is in g. Conversion: az_ms2 = (az_g - mean_az_g) * 9.81
  *
- * Units: az is in g. Conversion to m/s² and mean removal are applied
- * inside csv_imu_parse_az() before passing to wave_processor_run().
- *
- * File I/O stub:
- *   Currently uses an in-memory array of CSV line strings for testing.
- *   When FATFS is enabled, replace csv_imu_getline() with f_gets().
+ * File I/O is isolated behind CsvImuGetlineFn. Swap for f_gets() when FATFS
+ * is available — everything else stays unchanged.
  * --------------------------------------------------------------------------- */
 
-#define CSV_IMU_COL_AZ       3U     /* az column index (0-based)              */
-#define CSV_IMU_G_TO_MS2     9.81f  /* g to m/s² conversion                  */
-#define CSV_IMU_MAX_LINE     128U   /* max characters per CSV line            */
-#define CSV_IMU_MAX_SAMPLES  32768U /* max samples to parse in one session    */
+/* Column indices (0-based) */
+#define CSV_IMU_COL_TIMESTAMP   0U
+#define CSV_IMU_COL_AX          1U
+#define CSV_IMU_COL_AY          2U
+#define CSV_IMU_COL_AZ          3U
+#define CSV_IMU_COL_GX          4U
+#define CSV_IMU_COL_GY          5U
+#define CSV_IMU_COL_GZ          6U
+#define CSV_IMU_COL_MX          7U
+#define CSV_IMU_COL_MY          8U
+#define CSV_IMU_COL_MZ          9U
+#define CSV_IMU_COL_HEADING     10U
+#define CSV_IMU_COL_ROLL        11U
+#define CSV_IMU_COL_PITCH       12U
+
+#define CSV_IMU_G_TO_MS2        9.81f
+#define CSV_IMU_MAX_LINE        256U
+#define CSV_IMU_MAX_SAMPLES     32768U
+
+/* ---------------------------------------------------------------------------
+ * Full sample struct — all 13 columns
+ * --------------------------------------------------------------------------- */
+typedef struct {
+    uint32_t timestamp_ms;
+    float    ax_g;
+    float    ay_g;
+    float    az_g;
+    float    gx_dps;
+    float    gy_dps;
+    float    gz_dps;
+    float    mx;
+    float    my;
+    float    mz;
+    float    heading_deg;
+    float    roll_deg;
+    float    pitch_deg;
+} CsvImuSample_t;
 
 /* ---------------------------------------------------------------------------
  * Result struct
  * --------------------------------------------------------------------------- */
 typedef struct {
-    uint32_t n_samples;     /* number of az samples successfully parsed       */
-    float    mean_az_g;     /* mean az in g (removed before processing)       */
+    uint32_t n_samples;
+    float    mean_az_g;
 } CsvImuResult_t;
 
 /* ---------------------------------------------------------------------------
- * Public API
+ * Generic line-source function pointer
  *
- * csv_imu_parse_az()
- *   Parse az from CSV lines (stub or real source), mean-remove, convert to
- *   m/s², and store in az_ms2_out[].
+ * Signature matches both the in-memory stub and FATFS f_gets():
+ *   buf      — destination buffer
+ *   buf_size — buffer size in bytes
+ *   ctx      — caller context (e.g. FIL* or generator state)
  *
- *   Parameters:
- *     az_ms2_out  — output buffer, caller-allocated, size >= CSV_IMU_MAX_SAMPLES
- *     max_samples — maximum samples to read
- *     result      — filled with n_samples and mean_az_g
- *
- *   Returns:
- *     0  on success
- *    -1  if az_ms2_out or result is NULL
- *    -2  if no valid samples were parsed
+ * Returns buf on success, NULL when exhausted.
  * --------------------------------------------------------------------------- */
+typedef const char *(*CsvImuGetlineFn)(char    *buf,
+                                       uint32_t buf_size,
+                                       void    *ctx);
+
+/* ---------------------------------------------------------------------------
+ * Public API
+ * --------------------------------------------------------------------------- */
+
+/* Parse one full sensing subsystem CSV line into a sample struct.
+ * Returns 0 on success, negative on error or skip (header/empty). */
+int csv_imu_parse_sample_line(const char     *line,
+                               CsvImuSample_t *sample);
+
+/* Parse az from a generic line source, mean-remove, convert to m/s².
+ * Returns 0 on success, -1 bad args, -2 no samples. */
+int csv_imu_parse_az_from_source(CsvImuGetlineFn  getline_fn,
+                                  void            *ctx,
+                                  float           *az_ms2_out,
+                                  uint32_t         max_samples,
+                                  CsvImuResult_t  *result);
+
+/* Convenience wrapper — uses built-in in-memory stub source. */
 int csv_imu_parse_az(float          *az_ms2_out,
                      uint32_t        max_samples,
                      CsvImuResult_t *result);
