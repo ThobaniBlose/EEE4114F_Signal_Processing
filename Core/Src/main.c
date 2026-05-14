@@ -214,6 +214,11 @@ static void test_full_pipeline_filter_coefficients(void)
 
 /* Single shared DSP buffer — includes padding for filtfilt edge handling */
 static float wfp_buf[S001_REPLAY_N_SAMPLES + 2U * WFP_FILTFILT_PAD_BP];
+/* Second buffer for eta (needed during cross-spectral computation) */
+static float wfp_eta_buf[S001_REPLAY_N_SAMPLES + 2U * WFP_FILTFILT_PAD_BP];
+/* Cross-spectral bin arrays for band direction */
+static WfpCrossBin_t wfp_eta_x_bins[WFP_WAVE_N_BINS];
+static WfpCrossBin_t wfp_eta_y_bins[WFP_WAVE_N_BINS];
 
 static void test_full_pipeline_bandpass_filter(void)
 {
@@ -517,6 +522,143 @@ static void test_full_pipeline_direction_bin_setup(void)
     }
     uart_print("STEP 12A COMPLETE.\r\n");
 }
+
+static void test_full_pipeline_peak_direction(void)
+{
+    char buf[256];
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("STEP 12B: BODY-RELATIVE PEAK-BIN DIRECTION TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    WfpCrossBin_t eta_x, eta_y;
+    WfpDirectionPeak_t dir_peak;
+
+    /* Reconstruct eta and keep it in wfp_eta_buf */
+    wfp_reconstruct_eta_from_az_g(s001_az_g, wfp_eta_buf, S001_REPLAY_N_SAMPLES);
+
+    /* Reconstruct vx_body, compute eta-vx cross at peak bin */
+    wfp_reconstruct_velocity_from_accel_g(s001_ax_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_cross_bin_eta_h(wfp_eta_buf, wfp_buf, S001_REPLAY_N_SAMPLES,
+                        WFP_PEAK_K_S001_TRUNC, &eta_x);
+
+    /* Reconstruct vy_body (reuses wfp_buf), compute eta-vy cross */
+    wfp_reconstruct_velocity_from_accel_g(s001_ay_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_cross_bin_eta_h(wfp_eta_buf, wfp_buf, S001_REPLAY_N_SAMPLES,
+                        WFP_PEAK_K_S001_TRUNC, &eta_y);
+
+    wfp_direction_peak_from_cross(&eta_x, &eta_y, &dir_peak);
+
+    snprintf(buf, sizeof(buf),
+             "Peak-bin direction:\r\n"
+             "  k_peak      = %lu\r\n"
+             "  f_peak      = %.6f Hz\r\n"
+             "  segs        = %lu\r\n"
+             "  peak from   = %.6f deg\r\n"
+             "  peak toward = %.6f deg\r\n"
+             "  r1 peak     = %.6f\r\n"
+             "  vector coh  = %.6f\r\n",
+             (unsigned long)WFP_PEAK_K_S001_TRUNC,
+             (double)((float)WFP_PEAK_K_S001_TRUNC * WFP_DF_HZ),
+             (unsigned long)dir_peak.n_segs,
+             (double)dir_peak.peak_from_deg,
+             (double)dir_peak.peak_toward_deg,
+             (double)dir_peak.r1_peak,
+             (double)dir_peak.vector_coh_peak);
+    uart_print(buf);
+
+    uart_print("\r\nMATLAB target:\r\n");
+    uart_print("  peak from = 13.530366 deg\r\n");
+    uart_print("  r1 peak   = 0.753947\r\n");
+
+    uart_print("\r\nSTEP 12B COMPLETE.\r\n");
+}
+
+static void test_full_pipeline_band_direction(void)
+{
+    char buf[256];
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("STEP 12C: BODY-RELATIVE BAND-INTEGRATED DIRECTION TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    WfpDirectionBand_t dir_band;
+
+    uart_print("12C.1 Reconstructing eta from az...\r\n");
+    wfp_reconstruct_eta_from_az_g(s001_az_g, wfp_eta_buf, S001_REPLAY_N_SAMPLES);
+    uart_print("12C.1 done.\r\n");
+
+    uart_print("12C.2 Reconstructing vx_body from ax...\r\n");
+    wfp_reconstruct_velocity_from_accel_g(s001_ax_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    uart_print("12C.2 done.\r\n");
+
+    uart_print("12C.3 Computing eta-vx cross spectra...\r\n");
+    for (uint32_t i = 0U; i < WFP_WAVE_N_BINS; i++) {
+        uint32_t k = WFP_WAVE_K_MIN + i;
+        if ((i % 10U) == 0U) {
+            snprintf(buf, sizeof(buf), "  eta-vx bin i=%lu k=%lu\r\n",
+                     (unsigned long)i, (unsigned long)k);
+            uart_print(buf);
+        }
+        wfp_cross_bin_eta_h(wfp_eta_buf, wfp_buf, S001_REPLAY_N_SAMPLES,
+                            k, &wfp_eta_x_bins[i]);
+    }
+    uart_print("12C.3 done.\r\n");
+
+    uart_print("12C.4 Reconstructing vy_body from ay...\r\n");
+    wfp_reconstruct_velocity_from_accel_g(s001_ay_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    uart_print("12C.4 done.\r\n");
+
+    uart_print("12C.5 Computing eta-vy cross spectra...\r\n");
+    for (uint32_t i = 0U; i < WFP_WAVE_N_BINS; i++) {
+        uint32_t k = WFP_WAVE_K_MIN + i;
+        if ((i % 10U) == 0U) {
+            snprintf(buf, sizeof(buf), "  eta-vy bin i=%lu k=%lu\r\n",
+                     (unsigned long)i, (unsigned long)k);
+            uart_print(buf);
+        }
+        wfp_cross_bin_eta_h(wfp_eta_buf, wfp_buf, S001_REPLAY_N_SAMPLES,
+                            k, &wfp_eta_y_bins[i]);
+    }
+    uart_print("12C.5 done.\r\n");
+
+    uart_print("12C.6 Integrating directional result...\r\n");
+    wfp_direction_band_from_cross(wfp_eta_x_bins, wfp_eta_y_bins, &dir_band);
+    uart_print("12C.6 done.\r\n");
+
+    snprintf(buf, sizeof(buf),
+             "Band direction result:\r\n"
+             "  peak k     = %lu\r\n"
+             "  peak f     = %.6f Hz\r\n"
+             "  mean from  = %.6f deg\r\n"
+             "  peak from  = %.6f deg\r\n"
+             "  r1 band    = %.6f\r\n"
+             "  r1 peak    = %.6f\r\n"
+             "  mean coh   = %.6f\r\n"
+             "  confident  = %lu\r\n"
+             "  valid bins = %lu\r\n",
+             (unsigned long)dir_band.peak_k,
+             (double)dir_band.peak_freq_hz,
+             (double)dir_band.mean_from_deg,
+             (double)dir_band.peak_from_deg,
+             (double)dir_band.r1_band,
+             (double)dir_band.r1_peak,
+             (double)dir_band.mean_vector_coh,
+             (unsigned long)dir_band.direction_confident,
+             (unsigned long)dir_band.valid_bins);
+    uart_print(buf);
+
+    uart_print("\r\nMATLAB target:\r\n");
+    uart_print("  mean from  = 18.940496 deg\r\n");
+    uart_print("  peak from  = 13.530366 deg\r\n");
+    uart_print("  r1 band    = 0.681391\r\n");
+    uart_print("  r1 peak    = 0.753947\r\n");
+    uart_print("  mean coh   = 0.397559\r\n");
+    uart_print("  confident  = 1\r\n");
+    uart_print("  valid bins = 11\r\n");
+
+    uart_print("\r\nSTEP 12C COMPLETE.\r\n");
+}
 /* USER CODE END 0 */
 
 /**
@@ -714,6 +856,10 @@ int main(void)
   test_full_pipeline_wave_params();
 
   test_full_pipeline_direction_bin_setup();
+
+  test_full_pipeline_peak_direction();
+
+  test_full_pipeline_band_direction();
 
   uart_print("\r\nALL STEPS COMPLETE.\r\n");
   /* USER CODE END 2 */
