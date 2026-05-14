@@ -22,8 +22,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "wave_mode.h"
-#include "wave_packet.h"
-#include "wave_processor.h"
 #include "wave_full_pipeline.h"
 #include "s001_replay_segment.h"
 #include <string.h>
@@ -479,6 +477,46 @@ static void test_full_pipeline_wave_params(void)
     }
     uart_print("STEP 11 COMPLETE.\r\n");
 }
+
+static void test_full_pipeline_direction_bin_setup(void)
+{
+    char buf[256];
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("STEP 12A: DIRECTIONAL WAVE-BAND BIN SETUP\r\n");
+    uart_print("============================================================\r\n");
+
+    float f_min = (float)WFP_WAVE_K_MIN * WFP_DF_HZ;
+    float f_max = (float)WFP_WAVE_K_MAX * WFP_DF_HZ;
+
+    snprintf(buf, sizeof(buf),
+             "Spectral setup:\r\n"
+             "  fs     = %.1f Hz\r\n"
+             "  nfft   = %lu\r\n"
+             "  df     = %.9f Hz\r\n"
+             "  k_min  = %lu\r\n"
+             "  k_max  = %lu\r\n"
+             "  n_bins = %lu\r\n"
+             "  f_min  = %.9f Hz\r\n"
+             "  f_max  = %.9f Hz\r\n",
+             (double)WFP_FS_HZ,
+             (unsigned long)WFP_WELCH_NFFT,
+             (double)WFP_DF_HZ,
+             (unsigned long)WFP_WAVE_K_MIN,
+             (unsigned long)WFP_WAVE_K_MAX,
+             (unsigned long)WFP_WAVE_N_BINS,
+             (double)f_min, (double)f_max);
+    uart_print(buf);
+
+    uart_print("\r\nMATLAB wave band: 0.040 to 0.400 Hz\r\n");
+
+    if (f_min >= 0.04f && f_max <= 0.40f) {
+        uart_print("PASS: Directional wave-bin mapping correct.\r\n");
+    } else {
+        uart_print("CHECK: Bin mapping outside target band.\r\n");
+    }
+    uart_print("STEP 12A COMPLETE.\r\n");
+}
 /* USER CODE END 0 */
 
 /**
@@ -530,154 +568,9 @@ int main(void)
   /* USER CODE BEGIN 2 */
   char buf[256];
 
-  /* =======================================================================
-   * STEP 1: MODE + PACKET TEST
-   * ======================================================================= */
   uart_print("\r\n============================================================\r\n");
-  uart_print("STEP 1: MODE + PACKET TEST\r\n");
+  uart_print("SHARC FULL-PIPELINE EMBEDDED VALIDATION\r\n");
   uart_print("============================================================\r\n");
-
-  CsvImuSample_t sample = {
-      .timestamp_ms = 0U,
-      .ax_g = -0.0337f, .ay_g = -0.0322f, .az_g = 1.0142f,
-      .gx_dps = 0.3457f, .gy_dps = 1.0143f, .gz_dps = 0.3779f,
-      .mx = NAN, .my = NAN, .mz = NAN,
-      .heading_deg = NAN, .roll_deg = NAN, .pitch_deg = NAN
-  };
-
-  WaveModeResult_t mode_result;
-  wave_mode_decide(&sample, &mode_result);
-
-  snprintf(buf, sizeof(buf),
-           "Mode: %s  heading=%u mag=%u roll=%u pitch=%u\r\n",
-           wave_mode_label(mode_result.mode),
-           mode_result.heading_valid, mode_result.mag_valid,
-           mode_result.roll_valid, mode_result.pitch_valid);
-  uart_print(buf);
-
-  WavePacket_t pkt = {
-      .gps_fix = 0U, .lat = NAN, .lon = NAN,
-      .Hm0 = 1.149135f, .Tp = 16.384000f,
-      .Tm01 = 16.139453f, .Tm02 = 15.901107f,
-      .dir_deg = 32.086f,
-      .mode = mode_result.mode,
-      .quality = WAVE_QUALITY_DEGRADED,
-      .r1 = 0.4885f, .coh = 0.4084f
-  };
-  strncpy(pkt.session_id, "S001", sizeof(pkt.session_id));
-
-  char pkt_buf[WAVE_PACKET_MAX_LEN];
-  wave_packet_format(&pkt, pkt_buf, sizeof(pkt_buf));
-  uart_print("Tier-1 packet:\r\n");
-  uart_print(pkt_buf);
-  uart_print("\r\n");
-
-  if (mode_result.mode == WAVE_MODE_BODY_RELATIVE) {
-    uart_print("PASS: BODY_RELATIVE fallback correct.\r\n");
-  } else {
-    uart_print("FAIL: Expected BODY_RELATIVE.\r\n");
-  }
-  uart_print("STEP 1 COMPLETE.\r\n");
-
-  /* =======================================================================
-   * STEP 2: S001 TRUNCATED REPLAY VALIDATION
-   * The input s001_az_ms2[] was exported from S001_IMU.csv in MATLAB.
-   * Golden values are for this exact 32768-sample segment only.
-   * ======================================================================= */
-  uart_print("\r\n============================================================\r\n");
-  uart_print("STEP 2: S001 REPLAY PROCESSOR TEST\r\n");
-  uart_print("============================================================\r\n");
-
-  /* Convert s001_az_g[] to mean-removed m/s² for wave_processor_run() */
-  wfp_make_dynamic_accel_ms2(s001_az_g, wfp_buf, S001_REPLAY_N_SAMPLES);
-
-  wave_processor_init();
-
-  WaveProcessor_Result s001_result;
-  int s001_status = wave_processor_run(wfp_buf,
-                                       S001_REPLAY_N_SAMPLES,
-                                       &s001_result);
-  if (s001_status != 0) {
-    snprintf(buf, sizeof(buf), "S001 wave processor error: %d\r\n", s001_status);
-    uart_print(buf);
-    Error_Handler();
-  }
-
-  snprintf(buf, sizeof(buf),
-           "Segment: start=%lu end=%lu samples=%lu segs=%lu\r\n",
-           (unsigned long)S001_REPLAY_START_IDX,
-           (unsigned long)S001_REPLAY_END_IDX,
-           (unsigned long)S001_REPLAY_N_SAMPLES,
-           (unsigned long)s001_result.n_segs);
-  uart_print(buf);
-
-  uart_print("\r\nMATLAB golden (this segment):\r\n");
-  snprintf(buf, sizeof(buf),
-           "  Hm0=%.6f m  Tp=%.6f s  Tm01=%.6f s  Tm02=%.6f s\r\n",
-           (double)S001_REF_HM0_M, (double)S001_REF_TP_S,
-           (double)S001_REF_TM01_S, (double)S001_REF_TM02_S);
-  uart_print(buf);
-
-  uart_print("\r\nSTM computed:\r\n");
-  snprintf(buf, sizeof(buf),
-           "  Hm0=%.6f m  Tp=%.6f s  Tm01=%.6f s  Tm02=%.6f s\r\n",
-           (double)s001_result.Hm0, (double)s001_result.Tp,
-           (double)s001_result.Tm01, (double)s001_result.Tm02);
-  uart_print(buf);
-
-  float err_Hm0  = 100.0f * fabsf((s001_result.Hm0  - S001_REF_HM0_M)  / S001_REF_HM0_M);
-  float err_Tp   = 100.0f * fabsf((s001_result.Tp   - S001_REF_TP_S)   / S001_REF_TP_S);
-  float err_Tm01 = 100.0f * fabsf((s001_result.Tm01 - S001_REF_TM01_S) / S001_REF_TM01_S);
-  float err_Tm02 = 100.0f * fabsf((s001_result.Tm02 - S001_REF_TM02_S) / S001_REF_TM02_S);
-
-  snprintf(buf, sizeof(buf),
-           "\r\nErrors: Hm0=%.3f%%  Tp=%.3f%%  Tm01=%.3f%%  Tm02=%.3f%%\r\n",
-           (double)err_Hm0, (double)err_Tp,
-           (double)err_Tm01, (double)err_Tm02);
-  uart_print(buf);
-
-  if (err_Hm0 < 1.0f && err_Tp < 1.0f && err_Tm01 < 1.0f && err_Tm02 < 1.0f) {
-    uart_print("\r\nPASS: STM S001 replay matches MATLAB golden segment.\r\n");
-  } else {
-    uart_print("\r\nCHECK: STM S001 replay differs from MATLAB golden segment.\r\n");
-  }
-
-  /* =======================================================================
-   * STEP 3: TIER-1 PACKET FROM STM-COMPUTED VALUES
-   * Direction not computed yet — DIR/R1/COH are NaN, Q=0.
-   * Proves the packet can be populated from actual STM wave outputs.
-   * ======================================================================= */
-  uart_print("\r\n============================================================\r\n");
-  uart_print("STEP 3: TIER-1 PACKET FROM STM-COMPUTED VALUES\r\n");
-  uart_print("============================================================\r\n");
-
-  WavePacket_t pkt_from_stm = {
-      .gps_fix = 0U,
-      .lat = NAN, .lon = NAN,
-      .Hm0  = s001_result.Hm0,
-      .Tp   = s001_result.Tp,
-      .Tm01 = s001_result.Tm01,
-      .Tm02 = s001_result.Tm02,
-      .dir_deg = NAN,
-      .mode = WAVE_MODE_BODY_RELATIVE,
-      .quality = WAVE_QUALITY_GOOD,
-      .r1 = NAN, .coh = NAN,
-  };
-  strncpy(pkt_from_stm.session_id, "S001", sizeof(pkt_from_stm.session_id));
-  pkt_from_stm.session_id[sizeof(pkt_from_stm.session_id) - 1U] = '\0';
-
-  char stm_pkt_buf[WAVE_PACKET_MAX_LEN];
-  int stm_pkt_status = wave_packet_format(&pkt_from_stm, stm_pkt_buf, sizeof(stm_pkt_buf));
-
-  if (stm_pkt_status < 0) {
-    uart_print("STM-computed packet formatting failed.\r\n");
-    Error_Handler();
-  }
-
-  uart_print("STM-computed Tier-1 packet:\r\n");
-  uart_print(stm_pkt_buf);
-  uart_print("\r\n");
-  uart_print("STEP 3 COMPLETE.\r\n");
 
   /* =======================================================================
    * STEP 4: AUTOMATIC MODE DETECTION FROM S001 REPLAY ARRAYS
@@ -819,6 +712,8 @@ int main(void)
   test_full_pipeline_displacement_stage();
 
   test_full_pipeline_wave_params();
+
+  test_full_pipeline_direction_bin_setup();
 
   uart_print("\r\nALL STEPS COMPLETE.\r\n");
   /* USER CODE END 2 */

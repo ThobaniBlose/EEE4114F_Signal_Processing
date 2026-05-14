@@ -33,6 +33,13 @@
 #define WFP_WAVE_LO_HZ     (0.04f)
 #define WFP_WAVE_HI_HZ     (0.40f)
 
+/* Derived bin mapping for directional processing */
+#define WFP_DF_HZ          (WFP_FS_HZ / (float)WFP_WELCH_NFFT)
+#define WFP_WAVE_K_MIN     ((uint32_t)(WFP_WAVE_LO_HZ / WFP_DF_HZ + 0.999f))
+#define WFP_WAVE_K_MAX     ((uint32_t)(WFP_WAVE_HI_HZ / WFP_DF_HZ))
+#define WFP_WAVE_N_BINS    (WFP_WAVE_K_MAX - WFP_WAVE_K_MIN + 1U)
+#define WFP_N_SEGS_32768   (7U)
+
 /* Filter coefficients — exported for verification in Step 7 */
 extern const float wfp_bp_b[WFP_BP_NCOEFF];
 extern const float wfp_bp_a[WFP_BP_NCOEFF];
