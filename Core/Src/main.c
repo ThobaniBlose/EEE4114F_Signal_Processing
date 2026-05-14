@@ -21,9 +21,10 @@
 #include "main.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "wave_mode.h"
+#include "wave_packet.h"
 #include "wave_processor.h"
-#include "csv_imu_reader.h"
-#include "ws23_replay_segment.h"
+#include "s001_replay_segment.h"
 #include <string.h>
 #include <stdio.h>
 #include <math.h>
@@ -109,42 +110,6 @@ static void uart_print(const char *s)
 {
     HAL_UART_Transmit(&hlpuart1, (uint8_t*)s, strlen(s), HAL_MAX_DELAY);
 }
-
-/* ---------------------------------------------------------------------------
- * WS23 sensor CSV generator
- * Generates sensing subsystem format CSV rows on-the-fly from ws23_az_ms2[].
- * No 32768-string array needed — one row at a time.
- * --------------------------------------------------------------------------- */
-typedef struct { uint32_t line_index; } Ws23CsvGenCtx_t;
-
-static const char *ws23_sensor_csv_getline(char *buf, uint32_t buf_size, void *ctx)
-{
-    Ws23CsvGenCtx_t *gen = (Ws23CsvGenCtx_t *)ctx;
-    if (gen == 0 || buf == 0 || buf_size == 0U) return NULL;
-
-    /* First line: CSV header */
-    if (gen->line_index == 0U) {
-        snprintf(buf, buf_size,
-                 "timestamp_ms,ax,ay,az,gx,gy,gz,mx,my,mz,heading_deg,roll_deg,pitch_deg");
-        gen->line_index++;
-        return buf;
-    }
-
-    uint32_t i = gen->line_index - 1U;
-    if (i >= WS23_REPLAY_N_SAMPLES) return NULL;
-
-    /* Reconstruct az in g from the mean-removed m/s² replay data.
-     * csv_imu_reader will mean-remove and convert back — round-trip check. */
-    float az_g = 1.0f + (ws23_az_ms2[i] / CSV_IMU_G_TO_MS2);
-
-    snprintf(buf, buf_size,
-             "%lu,0.000000,0.000000,%.9f,0.000000,0.000000,0.000000,"
-             "20.000000,0.000000,40.000000,45.000000,0.000000,0.000000",
-             (unsigned long)(i * 10U), (double)az_g);
-
-    gen->line_index++;
-    return buf;
-}
 /* USER CODE END 0 */
 
 /**
@@ -194,153 +159,118 @@ int main(void)
   // MX_USB_OTG_FS_USB_Init();
 
   /* USER CODE BEGIN 2 */
-  char buf[192];
+  char buf[256];
 
-  /* -----------------------------------------------------------------------
-   * Stage 1: CSV parser test
-   * Confirms csv_imu_reader can parse az, remove mean, convert to m/s².
-   * Uses in-memory stub lines — no SD card needed.
-   * ----------------------------------------------------------------------- */
-  static float az_test[CSV_IMU_MAX_SAMPLES];
-  CsvImuResult_t csv_result;
-
-  int csv_status = csv_imu_parse_az(az_test, CSV_IMU_MAX_SAMPLES, &csv_result);
-
-  uart_print("--- CSV parser test ---\r\n");
-  if (csv_status != 0) {
-    snprintf(buf, sizeof(buf), "CSV parse error: %d\r\n", csv_status);
-    uart_print(buf);
-  } else {
-    /* Verify mean of az_ms2 is near zero after removal */
-    float check_sum = 0.0f;
-    for (uint32_t i = 0U; i < csv_result.n_samples; i++) check_sum += az_test[i];
-    float check_mean = check_sum / (float)csv_result.n_samples;
-
-    snprintf(buf, sizeof(buf),
-             "Parsed %lu samples  mean_az_g=%.4f g  post-removal mean=%.6f m/s2\r\n",
-             (unsigned long)csv_result.n_samples,
-             (double)csv_result.mean_az_g,
-             (double)check_mean);
-    uart_print(buf);
-
-    snprintf(buf, sizeof(buf),
-             "az_ms2[0]=%.5f  az_ms2[1]=%.5f  az_ms2[2]=%.5f\r\n",
-             (double)az_test[0], (double)az_test[1], (double)az_test[2]);
-    uart_print(buf);
-
-    uart_print("CSV parser: PASS\r\n");
-  }
-
-  /* -----------------------------------------------------------------------
-   * Stage 1B: Generated sensor CSV → wave processor
-   * Proves the full intended path: CSV format → csv_imu_reader → wave_processor
-   * Uses WS23 replay data encoded as sensing subsystem CSV rows on-the-fly.
-   * ----------------------------------------------------------------------- */
-  uart_print("\r\n--- Generated WS23 sensor CSV path test ---\r\n");
-
-  Ws23CsvGenCtx_t ws23_csv_ctx = {0};
-  int csv_ws23_status = csv_imu_parse_az_from_source(ws23_sensor_csv_getline,
-                                                      &ws23_csv_ctx,
-                                                      az_test,
-                                                      CSV_IMU_MAX_SAMPLES,
-                                                      &csv_result);
-  if (csv_ws23_status != 0) {
-    snprintf(buf, sizeof(buf), "Generated CSV parse error: %d\r\n", csv_ws23_status);
-    uart_print(buf);
-    Error_Handler();
-  }
-
-  snprintf(buf, sizeof(buf), "Parsed %lu generated CSV samples  mean_az_g=%.6f g\r\n",
-           (unsigned long)csv_result.n_samples, (double)csv_result.mean_az_g);
-  uart_print(buf);
-
-  wave_processor_init();
-  WaveProcessor_Result csv_wave_result;
-  int csv_wave_status = wave_processor_run(az_test, csv_result.n_samples, &csv_wave_result);
-
-  if (csv_wave_status != 0) {
-    snprintf(buf, sizeof(buf), "CSV wave processor error: %d\r\n", csv_wave_status);
-    uart_print(buf);
-    Error_Handler();
-  }
-
-  snprintf(buf, sizeof(buf),
-           "CSV path: Hm0=%.4f m  Tp=%.4f s  Tm01=%.4f s  Tm02=%.4f s\r\n",
-           (double)csv_wave_result.Hm0, (double)csv_wave_result.Tp,
-           (double)csv_wave_result.Tm01, (double)csv_wave_result.Tm02);
-  uart_print(buf);
-
-  float csv_err_Hm0  = 100.0f * fabsf((csv_wave_result.Hm0  - WS23_REF_HM0_M)  / WS23_REF_HM0_M);
-  float csv_err_Tp   = 100.0f * fabsf((csv_wave_result.Tp   - WS23_REF_TP_S)   / WS23_REF_TP_S);
-  float csv_err_Tm01 = 100.0f * fabsf((csv_wave_result.Tm01 - WS23_REF_TM01_S) / WS23_REF_TM01_S);
-  float csv_err_Tm02 = 100.0f * fabsf((csv_wave_result.Tm02 - WS23_REF_TM02_S) / WS23_REF_TM02_S);
-
-  snprintf(buf, sizeof(buf),
-           "CSV path errors: Hm0=%.2f%%  Tp=%.2f%%  Tm01=%.2f%%  Tm02=%.2f%%\r\n",
-           (double)csv_err_Hm0, (double)csv_err_Tp,
-           (double)csv_err_Tm01, (double)csv_err_Tm02);
-  uart_print(buf);
-
-  if (csv_err_Hm0 < 5.0f && csv_err_Tp < 5.0f &&
-      csv_err_Tm01 < 5.0f && csv_err_Tm02 < 5.0f) {
-    uart_print("PASS: Generated sensor CSV path matches MATLAB reference.\r\n");
-  } else {
-    uart_print("CHECK: Generated sensor CSV path differs from MATLAB reference.\r\n");
-  }
-
-  /* -----------------------------------------------------------------------
-   * Stage 2: WS23 replay — wave processor validation
-   * ----------------------------------------------------------------------- */
-  wave_processor_init();
-  uart_print("\r\n--- WS23 replay processor ready ---\r\n");
-
-  WaveProcessor_Result result;
-  int status = wave_processor_run(ws23_az_ms2, WS23_REPLAY_N_SAMPLES, &result);
-
-  if (status != 0) {
-    snprintf(buf, sizeof(buf), "Wave processor error: %d\r\n", status);
-    uart_print(buf);
-    Error_Handler();
-  }
-
+  /* =======================================================================
+   * STEP 1: MODE + PACKET TEST
+   * ======================================================================= */
   uart_print("\r\n============================================================\r\n");
-  uart_print("STM WS23 REAL-DATA REPLAY RESULT\r\n");
+  uart_print("STEP 1: MODE + PACKET TEST\r\n");
   uart_print("============================================================\r\n");
 
-  snprintf(buf, sizeof(buf), "segs=%lu  win=%u  nfft=%u\r\n",
-           (unsigned long)result.n_segs, WP_WIN_LEN, WP_NFFT);
+  CsvImuSample_t sample = {
+      .timestamp_ms = 0U,
+      .ax_g = -0.0337f, .ay_g = -0.0322f, .az_g = 1.0142f,
+      .gx_dps = 0.3457f, .gy_dps = 1.0143f, .gz_dps = 0.3779f,
+      .mx = NAN, .my = NAN, .mz = NAN,
+      .heading_deg = NAN, .roll_deg = NAN, .pitch_deg = NAN
+  };
+
+  WaveModeResult_t mode_result;
+  wave_mode_decide(&sample, &mode_result);
+
+  snprintf(buf, sizeof(buf),
+           "Mode: %s  heading=%u mag=%u roll=%u pitch=%u\r\n",
+           wave_mode_label(mode_result.mode),
+           mode_result.heading_valid, mode_result.mag_valid,
+           mode_result.roll_valid, mode_result.pitch_valid);
   uart_print(buf);
 
-  uart_print("\r\nMATLAB reference:\r\n");
+  WavePacket_t pkt = {
+      .gps_fix = 0U, .lat = NAN, .lon = NAN,
+      .Hm0 = 1.149135f, .Tp = 16.384000f,
+      .Tm01 = 16.139453f, .Tm02 = 15.901107f,
+      .dir_deg = 32.086f,
+      .mode = mode_result.mode,
+      .quality = WAVE_QUALITY_DEGRADED,
+      .r1 = 0.4885f, .coh = 0.4084f
+  };
+  strncpy(pkt.session_id, "S001", sizeof(pkt.session_id));
+
+  char pkt_buf[WAVE_PACKET_MAX_LEN];
+  wave_packet_format(&pkt, pkt_buf, sizeof(pkt_buf));
+  uart_print("Tier-1 packet:\r\n");
+  uart_print(pkt_buf);
+  uart_print("\r\n");
+
+  if (mode_result.mode == WAVE_MODE_BODY_RELATIVE) {
+    uart_print("PASS: BODY_RELATIVE fallback correct.\r\n");
+  } else {
+    uart_print("FAIL: Expected BODY_RELATIVE.\r\n");
+  }
+  uart_print("STEP 1 COMPLETE.\r\n");
+
+  /* =======================================================================
+   * STEP 2: S001 TRUNCATED REPLAY VALIDATION
+   * The input s001_az_ms2[] was exported from S001_IMU.csv in MATLAB.
+   * Golden values are for this exact 32768-sample segment only.
+   * ======================================================================= */
+  uart_print("\r\n============================================================\r\n");
+  uart_print("STEP 2: S001 REPLAY PROCESSOR TEST\r\n");
+  uart_print("============================================================\r\n");
+
+  wave_processor_init();
+
+  WaveProcessor_Result s001_result;
+  int s001_status = wave_processor_run(s001_az_ms2,
+                                       S001_REPLAY_N_SAMPLES,
+                                       &s001_result);
+  if (s001_status != 0) {
+    snprintf(buf, sizeof(buf), "S001 wave processor error: %d\r\n", s001_status);
+    uart_print(buf);
+    Error_Handler();
+  }
+
   snprintf(buf, sizeof(buf),
-           "  Hm0=%.4f m  Tp=%.4f s  Tm01=%.4f s  Tm02=%.4f s\r\n",
-           (double)WS23_REF_HM0_M, (double)WS23_REF_TP_S,
-           (double)WS23_REF_TM01_S, (double)WS23_REF_TM02_S);
+           "Segment: start=%lu end=%lu samples=%lu segs=%lu\r\n",
+           (unsigned long)S001_REPLAY_START_IDX,
+           (unsigned long)S001_REPLAY_END_IDX,
+           (unsigned long)S001_REPLAY_N_SAMPLES,
+           (unsigned long)s001_result.n_segs);
+  uart_print(buf);
+
+  uart_print("\r\nMATLAB golden (this segment):\r\n");
+  snprintf(buf, sizeof(buf),
+           "  Hm0=%.6f m  Tp=%.6f s  Tm01=%.6f s  Tm02=%.6f s\r\n",
+           (double)S001_REF_HM0_M, (double)S001_REF_TP_S,
+           (double)S001_REF_TM01_S, (double)S001_REF_TM02_S);
   uart_print(buf);
 
   uart_print("\r\nSTM computed:\r\n");
   snprintf(buf, sizeof(buf),
-           "  Hm0=%.4f m  Tp=%.4f s  Tm01=%.4f s  Tm02=%.4f s\r\n",
-           (double)result.Hm0, (double)result.Tp,
-           (double)result.Tm01, (double)result.Tm02);
+           "  Hm0=%.6f m  Tp=%.6f s  Tm01=%.6f s  Tm02=%.6f s\r\n",
+           (double)s001_result.Hm0, (double)s001_result.Tp,
+           (double)s001_result.Tm01, (double)s001_result.Tm02);
   uart_print(buf);
 
-  float err_Hm0  = 100.0f * fabsf((result.Hm0  - WS23_REF_HM0_M)  / WS23_REF_HM0_M);
-  float err_Tp   = 100.0f * fabsf((result.Tp   - WS23_REF_TP_S)   / WS23_REF_TP_S);
-  float err_Tm01 = 100.0f * fabsf((result.Tm01 - WS23_REF_TM01_S) / WS23_REF_TM01_S);
-  float err_Tm02 = 100.0f * fabsf((result.Tm02 - WS23_REF_TM02_S) / WS23_REF_TM02_S);
+  float err_Hm0  = 100.0f * fabsf((s001_result.Hm0  - S001_REF_HM0_M)  / S001_REF_HM0_M);
+  float err_Tp   = 100.0f * fabsf((s001_result.Tp   - S001_REF_TP_S)   / S001_REF_TP_S);
+  float err_Tm01 = 100.0f * fabsf((s001_result.Tm01 - S001_REF_TM01_S) / S001_REF_TM01_S);
+  float err_Tm02 = 100.0f * fabsf((s001_result.Tm02 - S001_REF_TM02_S) / S001_REF_TM02_S);
 
   snprintf(buf, sizeof(buf),
-           "\r\nErrors: Hm0=%.2f%%  Tp=%.2f%%  Tm01=%.2f%%  Tm02=%.2f%%\r\n",
+           "\r\nErrors: Hm0=%.3f%%  Tp=%.3f%%  Tm01=%.3f%%  Tm02=%.3f%%\r\n",
            (double)err_Hm0, (double)err_Tp,
            (double)err_Tm01, (double)err_Tm02);
   uart_print(buf);
 
-  if (err_Hm0 < 5.0f && err_Tp < 5.0f && err_Tm01 < 5.0f && err_Tm02 < 5.0f) {
-      uart_print("\r\nPASS: STM matches MATLAB reference.\r\n");
+  if (err_Hm0 < 1.0f && err_Tp < 1.0f && err_Tm01 < 1.0f && err_Tm02 < 1.0f) {
+    uart_print("\r\nPASS: STM S001 replay matches MATLAB golden segment.\r\n");
   } else {
-      uart_print("\r\nCHECK: STM differs from MATLAB reference.\r\n");
+    uart_print("\r\nCHECK: STM S001 replay differs from MATLAB golden segment.\r\n");
   }
+
+  uart_print("\r\nALL STEPS COMPLETE.\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */

@@ -14,9 +14,9 @@
 #define WP_WIN_LEN      8192U       /* segment length [samples]                */
 #define WP_NFFT         32768U      /* zero-padded DFT length                  */
 #define WP_HOP_LEN      (WP_WIN_LEN / 2U)   /* 50% overlap                    */
-#define WP_F1_HZ        0.040f      /* low-freq taper start [Hz]               */
-#define WP_F2_HZ        0.050f      /* low-freq taper end [Hz]                 */
-#define WP_F_HI_HZ      0.500f      /* upper wave-band limit [Hz]              */
+#define WP_F1_HZ        0.020f      /* low-freq taper start [Hz]               */
+#define WP_F2_HZ        0.040f      /* low-freq taper end [Hz]                 */
+#define WP_F_HI_HZ      0.400f      /* upper wave-band limit [Hz]              */
 
 /* ---------------------------------------------------------------------------
  * Result struct — filled by wave_processor_run()
