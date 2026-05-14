@@ -219,6 +219,17 @@ int main(void)
   uart_print("STEP 2: S001 REPLAY PROCESSOR TEST\r\n");
   uart_print("============================================================\r\n");
 
+  /* Convert s001_az_g[] to mean-removed m/s² for wave_processor_run() */
+  static float s001_az_ms2[S001_REPLAY_N_SAMPLES];
+  {
+    float sum_g = 0.0f;
+    for (uint32_t i = 0; i < S001_REPLAY_N_SAMPLES; i++) sum_g += s001_az_g[i];
+    float mean_g = sum_g / (float)S001_REPLAY_N_SAMPLES;
+    for (uint32_t i = 0; i < S001_REPLAY_N_SAMPLES; i++) {
+      s001_az_ms2[i] = (s001_az_g[i] - mean_g) * 9.80665f;
+    }
+  }
+
   wave_processor_init();
 
   WaveProcessor_Result s001_result;
@@ -269,6 +280,107 @@ int main(void)
   } else {
     uart_print("\r\nCHECK: STM S001 replay differs from MATLAB golden segment.\r\n");
   }
+
+  /* =======================================================================
+   * STEP 3: TIER-1 PACKET FROM STM-COMPUTED VALUES
+   * Direction not computed yet — DIR/R1/COH are NaN, Q=0.
+   * Proves the packet can be populated from actual STM wave outputs.
+   * ======================================================================= */
+  uart_print("\r\n============================================================\r\n");
+  uart_print("STEP 3: TIER-1 PACKET FROM STM-COMPUTED VALUES\r\n");
+  uart_print("============================================================\r\n");
+
+  WavePacket_t pkt_from_stm = {
+      .gps_fix = 0U,
+      .lat = NAN, .lon = NAN,
+      .Hm0  = s001_result.Hm0,
+      .Tp   = s001_result.Tp,
+      .Tm01 = s001_result.Tm01,
+      .Tm02 = s001_result.Tm02,
+      .dir_deg = NAN,
+      .mode = WAVE_MODE_BODY_RELATIVE,
+      .quality = WAVE_QUALITY_GOOD,
+      .r1 = NAN, .coh = NAN,
+  };
+  strncpy(pkt_from_stm.session_id, "S001", sizeof(pkt_from_stm.session_id));
+  pkt_from_stm.session_id[sizeof(pkt_from_stm.session_id) - 1U] = '\0';
+
+  char stm_pkt_buf[WAVE_PACKET_MAX_LEN];
+  int stm_pkt_status = wave_packet_format(&pkt_from_stm, stm_pkt_buf, sizeof(stm_pkt_buf));
+
+  if (stm_pkt_status < 0) {
+    uart_print("STM-computed packet formatting failed.\r\n");
+    Error_Handler();
+  }
+
+  uart_print("STM-computed Tier-1 packet:\r\n");
+  uart_print(stm_pkt_buf);
+  uart_print("\r\n");
+  uart_print("STEP 3 COMPLETE.\r\n");
+
+  /* =======================================================================
+   * STEP 4: AUTOMATIC MODE DETECTION FROM S001 REPLAY ARRAYS
+   * STM scans the replay data and decides mode by itself.
+   * Expected: BODY_RELATIVE (mag/heading/roll/pitch are NaN in S001).
+   * ======================================================================= */
+  uart_print("\r\n============================================================\r\n");
+  uart_print("STEP 4: AUTOMATIC MODE DETECTION FROM REPLAY DATA\r\n");
+  uart_print("============================================================\r\n");
+
+  {
+    uint32_t n = S001_REPLAY_N_SAMPLES;
+    uint32_t ax_ok = 0, ay_ok = 0, az_ok = 0;
+    uint32_t mx_ok = 0, my_ok = 0, mz_ok = 0;
+    uint32_t hdg_ok = 0, roll_ok_cnt = 0, pitch_ok_cnt = 0;
+
+    for (uint32_t i = 0; i < n; i++) {
+      if (isfinite(s001_ax_g[i]))      ax_ok++;
+      if (isfinite(s001_ay_g[i]))      ay_ok++;
+      if (isfinite(s001_az_g[i]))      az_ok++;
+      if (isfinite(s001_mx_uT[i]))     mx_ok++;
+      if (isfinite(s001_my_uT[i]))     my_ok++;
+      if (isfinite(s001_mz_uT[i]))     mz_ok++;
+      if (isfinite(s001_heading_deg[i])) hdg_ok++;
+      if (isfinite(s001_roll_deg[i]))  roll_ok_cnt++;
+      if (isfinite(s001_pitch_deg[i])) pitch_ok_cnt++;
+    }
+
+    float motion_frac  = (float)(ax_ok + ay_ok + az_ok) / (3.0f * (float)n);
+    float mag_frac     = (float)(mx_ok + my_ok + mz_ok) / (3.0f * (float)n);
+    float heading_frac = (float)hdg_ok / (float)n;
+    float roll_frac    = (float)roll_ok_cnt / (float)n;
+    float pitch_frac   = (float)pitch_ok_cnt / (float)n;
+
+    snprintf(buf, sizeof(buf),
+             "Motion finite frac  = %.4f\r\n"
+             "Mag finite frac     = %.4f\r\n"
+             "Heading finite frac = %.4f\r\n"
+             "Roll finite frac    = %.4f\r\n"
+             "Pitch finite frac   = %.4f\r\n",
+             (double)motion_frac, (double)mag_frac,
+             (double)heading_frac, (double)roll_frac, (double)pitch_frac);
+    uart_print(buf);
+
+    const char *auto_mode;
+    if (motion_frac >= 0.95f && mag_frac >= 0.95f &&
+        heading_frac >= 0.95f && roll_frac >= 0.95f && pitch_frac >= 0.95f) {
+      auto_mode = "GEOGRAPHIC";
+    } else if (motion_frac >= 0.95f) {
+      auto_mode = "BODY_RELATIVE";
+    } else {
+      auto_mode = "VERTICAL_ONLY";
+    }
+
+    snprintf(buf, sizeof(buf), "\r\nAuto-detected mode = %s\r\n", auto_mode);
+    uart_print(buf);
+
+    if (strcmp(auto_mode, "BODY_RELATIVE") == 0) {
+      uart_print("PASS: Replay data triggers BODY_RELATIVE automatically.\r\n");
+    } else {
+      uart_print("FAIL: Expected BODY_RELATIVE for S001 replay.\r\n");
+    }
+  }
+  uart_print("STEP 4 COMPLETE.\r\n");
 
   uart_print("\r\nALL STEPS COMPLETE.\r\n");
   /* USER CODE END 2 */
