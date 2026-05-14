@@ -39,4 +39,25 @@ extern const float wfp_bp_a[WFP_BP_NCOEFF];
 extern const float wfp_hp_b[WFP_HP_NCOEFF];
 extern const float wfp_hp_a[WFP_HP_NCOEFF];
 
+/* ---------------------------------------------------------------------------
+ * Processing functions
+ * --------------------------------------------------------------------------- */
+
+/* Compute RMS of a float array */
+float wfp_rms(const float *x, uint32_t n);
+
+/* Convert g array to mean-removed m/s² */
+void wfp_make_dynamic_accel_ms2(const float *x_g,
+                                float       *x_dyn_ms2,
+                                uint32_t     n);
+
+#define WFP_FILTFILT_PAD_BP  (12U)    /* reflection padding samples per edge */
+
+/* Forward-backward (filtfilt) bandpass filter using SOS, in-place.
+ * Buffer must be at least n + 2*WFP_FILTFILT_PAD_BP floats. */
+void wfp_filtfilt_bp_order4_inplace(float *x, uint32_t n);
+
+/* Forward-backward (filtfilt) high-pass filter using SOS, in-place. */
+void wfp_filtfilt_hp_order2_inplace(float *x, uint32_t n);
+
 #endif /* WAVE_FULL_PIPELINE_H */

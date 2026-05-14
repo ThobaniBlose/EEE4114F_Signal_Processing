@@ -213,6 +213,45 @@ static void test_full_pipeline_filter_coefficients(void)
     uart_print("PASS: Filter coefficients loaded.\r\n");
     uart_print("STEP 7 COMPLETE.\r\n");
 }
+
+/* Single shared DSP buffer — includes padding for filtfilt edge handling */
+static float wfp_buf[S001_REPLAY_N_SAMPLES + 2U * WFP_FILTFILT_PAD_BP];
+
+static void test_full_pipeline_bandpass_filter(void)
+{
+    char buf[256];
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("STEP 8: FULL-PIPELINE BANDPASS FILTER TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    wfp_make_dynamic_accel_ms2(s001_ax_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_filtfilt_bp_order4_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    float ax_rms = wfp_rms(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    wfp_make_dynamic_accel_ms2(s001_ay_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_filtfilt_bp_order4_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    float ay_rms = wfp_rms(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    wfp_make_dynamic_accel_ms2(s001_az_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_filtfilt_bp_order4_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    float az_rms = wfp_rms(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    snprintf(buf, sizeof(buf),
+             "Bandpass filtered accel RMS [m/s2]:\r\n"
+             "  ax_filt = %.9e\r\n"
+             "  ay_filt = %.9e\r\n"
+             "  az_filt = %.9e\r\n",
+             (double)ax_rms, (double)ay_rms, (double)az_rms);
+    uart_print(buf);
+
+    uart_print("\r\nMATLAB targets:\r\n");
+    uart_print("  ax_filt = 6.930560786e-03\r\n");
+    uart_print("  ay_filt = 6.219773947e-03\r\n");
+    uart_print("  az_filt = 4.109526795e-02\r\n");
+
+    uart_print("\r\nSTEP 8 COMPLETE.\r\n");
+}
 /* USER CODE END 0 */
 
 /**
@@ -323,20 +362,12 @@ int main(void)
   uart_print("============================================================\r\n");
 
   /* Convert s001_az_g[] to mean-removed m/s² for wave_processor_run() */
-  static float s001_az_ms2[S001_REPLAY_N_SAMPLES];
-  {
-    float sum_g = 0.0f;
-    for (uint32_t i = 0; i < S001_REPLAY_N_SAMPLES; i++) sum_g += s001_az_g[i];
-    float mean_g = sum_g / (float)S001_REPLAY_N_SAMPLES;
-    for (uint32_t i = 0; i < S001_REPLAY_N_SAMPLES; i++) {
-      s001_az_ms2[i] = (s001_az_g[i] - mean_g) * 9.80665f;
-    }
-  }
+  wfp_make_dynamic_accel_ms2(s001_az_g, wfp_buf, S001_REPLAY_N_SAMPLES);
 
   wave_processor_init();
 
   WaveProcessor_Result s001_result;
-  int s001_status = wave_processor_run(s001_az_ms2,
+  int s001_status = wave_processor_run(wfp_buf,
                                        S001_REPLAY_N_SAMPLES,
                                        &s001_result);
   if (s001_status != 0) {
@@ -553,6 +584,8 @@ int main(void)
   test_full_pipeline_mean_removal();
 
   test_full_pipeline_filter_coefficients();
+
+  test_full_pipeline_bandpass_filter();
 
   uart_print("\r\nALL STEPS COMPLETE.\r\n");
   /* USER CODE END 2 */
