@@ -298,6 +298,50 @@ static void test_full_pipeline_velocity_stage(void)
 
     uart_print("\r\nSTEP 9 COMPLETE.\r\n");
 }
+
+static float local_max_abs_float(const float *x, uint32_t n)
+{
+    float max_abs = 0.0f;
+    for (uint32_t i = 0U; i < n; i++) {
+        float a = fabsf(x[i]);
+        if (a > max_abs) max_abs = a;
+    }
+    return max_abs;
+}
+
+static void test_full_pipeline_displacement_stage(void)
+{
+    char buf[256];
+    const float dt_s = 1.0f / WFP_FS_HZ;
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("STEP 10: FULL-PIPELINE VERTICAL DISPLACEMENT TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    /* az_dyn → bandpass → integrate → HP → integrate → HP = eta */
+    wfp_make_dynamic_accel_ms2(s001_az_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_filtfilt_bp_order4_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_cumtrapz_inplace(wfp_buf, S001_REPLAY_N_SAMPLES, dt_s);
+    wfp_filtfilt_hp_order2_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_cumtrapz_inplace(wfp_buf, S001_REPLAY_N_SAMPLES, dt_s);
+    wfp_filtfilt_hp_order2_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    float eta_rms     = wfp_rms(wfp_buf, S001_REPLAY_N_SAMPLES);
+    float eta_max_abs = local_max_abs_float(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    snprintf(buf, sizeof(buf),
+             "Recovered vertical displacement:\r\n"
+             "  eta RMS     = %.9e m\r\n"
+             "  eta max abs = %.9e m\r\n",
+             (double)eta_rms, (double)eta_max_abs);
+    uart_print(buf);
+
+    uart_print("\r\nMATLAB targets:\r\n");
+    uart_print("  eta RMS     = 2.680921055e-01 m\r\n");
+    uart_print("  eta max abs = 6.595198828e-01 m\r\n");
+
+    uart_print("\r\nSTEP 10 COMPLETE.\r\n");
+}
 /* USER CODE END 0 */
 
 /**
@@ -634,6 +678,8 @@ int main(void)
   test_full_pipeline_bandpass_filter();
 
   test_full_pipeline_velocity_stage();
+
+  test_full_pipeline_displacement_stage();
 
   uart_print("\r\nALL STEPS COMPLETE.\r\n");
   /* USER CODE END 2 */
