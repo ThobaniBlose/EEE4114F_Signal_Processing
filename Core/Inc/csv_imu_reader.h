@@ -55,12 +55,19 @@ typedef struct {
 } CsvImuSample_t;
 
 /* ---------------------------------------------------------------------------
- * Result struct
+ * Motion result struct — all channels needed for directional processing
  * --------------------------------------------------------------------------- */
 typedef struct {
     uint32_t n_samples;
     float    mean_az_g;
 } CsvImuResult_t;
+
+typedef struct {
+    uint32_t n_samples;
+    float    mean_ax_g;
+    float    mean_ay_g;
+    float    mean_az_g;
+} CsvMotionResult_t;
 
 /* ---------------------------------------------------------------------------
  * Generic line-source function pointer
@@ -92,6 +99,21 @@ int csv_imu_parse_az_from_source(CsvImuGetlineFn  getline_fn,
                                   float           *az_ms2_out,
                                   uint32_t         max_samples,
                                   CsvImuResult_t  *result);
+
+/* Parse all motion channels needed for directional processing.
+ * Fills ax/ay/az (m/s², mean-removed) and heading/roll/pitch (deg).
+ * All output arrays must be caller-allocated with size >= max_samples.
+ * Returns 0 on success, -1 bad args, -2 no samples. */
+int csv_imu_parse_motion_from_source(CsvImuGetlineFn   getline_fn,
+                                      void             *ctx,
+                                      float            *ax_ms2_out,
+                                      float            *ay_ms2_out,
+                                      float            *az_ms2_out,
+                                      float            *heading_out,
+                                      float            *roll_out,
+                                      float            *pitch_out,
+                                      uint32_t          max_samples,
+                                      CsvMotionResult_t *result);
 
 /* Convenience wrapper — uses built-in in-memory stub source. */
 int csv_imu_parse_az(float          *az_ms2_out,

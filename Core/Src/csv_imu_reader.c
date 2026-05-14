@@ -119,6 +119,72 @@ int csv_imu_parse_sample_line(const char *line, CsvImuSample_t *sample)
 }
 
 /* ---------------------------------------------------------------------------
+ * csv_imu_parse_motion_from_source
+ *
+ * Parses all motion channels needed for directional wave processing:
+ *   ax, ay, az  — mean-removed, converted from g to m/s²
+ *   heading, roll, pitch — in degrees, passed through as-is
+ * --------------------------------------------------------------------------- */
+int csv_imu_parse_motion_from_source(CsvImuGetlineFn   getline_fn,
+                                      void             *ctx,
+                                      float            *ax_ms2_out,
+                                      float            *ay_ms2_out,
+                                      float            *az_ms2_out,
+                                      float            *heading_out,
+                                      float            *roll_out,
+                                      float            *pitch_out,
+                                      uint32_t          max_samples,
+                                      CsvMotionResult_t *result)
+{
+    if (getline_fn == 0 || result == 0) return -1;
+    if (ax_ms2_out == 0 || ay_ms2_out == 0 || az_ms2_out == 0) return -1;
+    if (heading_out == 0 || roll_out == 0 || pitch_out == 0)    return -1;
+
+    char           line[CSV_IMU_MAX_LINE];
+    CsvImuSample_t sample;
+    uint32_t       n      = 0U;
+    float          sum_ax = 0.0f, sum_ay = 0.0f, sum_az = 0.0f;
+
+    while (n < max_samples) {
+        if (getline_fn(line, sizeof(line), ctx) == NULL) break;
+        if (csv_imu_parse_sample_line(line, &sample) != 0) continue;
+
+        /* Store raw g values temporarily for mean removal */
+        ax_ms2_out[n]  = sample.ax_g;
+        ay_ms2_out[n]  = sample.ay_g;
+        az_ms2_out[n]  = sample.az_g;
+        heading_out[n] = sample.heading_deg;
+        roll_out[n]    = sample.roll_deg;
+        pitch_out[n]   = sample.pitch_deg;
+
+        sum_ax += sample.ax_g;
+        sum_ay += sample.ay_g;
+        sum_az += sample.az_g;
+        n++;
+    }
+
+    if (n == 0U) return -2;
+
+    float mean_ax = sum_ax / (float)n;
+    float mean_ay = sum_ay / (float)n;
+    float mean_az = sum_az / (float)n;
+
+    /* Mean-remove and convert g → m/s² for all acceleration channels */
+    for (uint32_t i = 0U; i < n; i++) {
+        ax_ms2_out[i] = (ax_ms2_out[i] - mean_ax) * CSV_IMU_G_TO_MS2;
+        ay_ms2_out[i] = (ay_ms2_out[i] - mean_ay) * CSV_IMU_G_TO_MS2;
+        az_ms2_out[i] = (az_ms2_out[i] - mean_az) * CSV_IMU_G_TO_MS2;
+    }
+
+    result->n_samples = n;
+    result->mean_ax_g = mean_ax;
+    result->mean_ay_g = mean_ay;
+    result->mean_az_g = mean_az;
+
+    return 0;
+}
+
+/* ---------------------------------------------------------------------------
  * csv_imu_parse_az_from_source
  * --------------------------------------------------------------------------- */
 int csv_imu_parse_az_from_source(CsvImuGetlineFn  getline_fn,
