@@ -252,6 +252,52 @@ static void test_full_pipeline_bandpass_filter(void)
 
     uart_print("\r\nSTEP 8 COMPLETE.\r\n");
 }
+
+static void test_full_pipeline_velocity_stage(void)
+{
+    char buf[256];
+    const float dt_s = 1.0f / WFP_FS_HZ;
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("STEP 9: FULL-PIPELINE VELOCITY RECOVERY TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    /* vx_body from ax */
+    wfp_make_dynamic_accel_ms2(s001_ax_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_filtfilt_bp_order4_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_cumtrapz_inplace(wfp_buf, S001_REPLAY_N_SAMPLES, dt_s);
+    wfp_filtfilt_hp_order2_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    float vx_rms = wfp_rms(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    /* vy_body from ay */
+    wfp_make_dynamic_accel_ms2(s001_ay_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_filtfilt_bp_order4_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_cumtrapz_inplace(wfp_buf, S001_REPLAY_N_SAMPLES, dt_s);
+    wfp_filtfilt_hp_order2_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    float vy_rms = wfp_rms(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    /* vz from az */
+    wfp_make_dynamic_accel_ms2(s001_az_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_filtfilt_bp_order4_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_cumtrapz_inplace(wfp_buf, S001_REPLAY_N_SAMPLES, dt_s);
+    wfp_filtfilt_hp_order2_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    float vz_rms = wfp_rms(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    snprintf(buf, sizeof(buf),
+             "Recovered velocity RMS [m/s]:\r\n"
+             "  vx_body = %.9e\r\n"
+             "  vy_body = %.9e\r\n"
+             "  vz      = %.9e\r\n",
+             (double)vx_rms, (double)vy_rms, (double)vz_rms);
+    uart_print(buf);
+
+    uart_print("\r\nMATLAB targets:\r\n");
+    uart_print("  vx_body = 1.226652456e-02\r\n");
+    uart_print("  vy_body = 1.188385420e-02\r\n");
+    uart_print("  vz      = 1.019634046e-01\r\n");
+
+    uart_print("\r\nSTEP 9 COMPLETE.\r\n");
+}
 /* USER CODE END 0 */
 
 /**
@@ -586,6 +632,8 @@ int main(void)
   test_full_pipeline_filter_coefficients();
 
   test_full_pipeline_bandpass_filter();
+
+  test_full_pipeline_velocity_stage();
 
   uart_print("\r\nALL STEPS COMPLETE.\r\n");
   /* USER CODE END 2 */

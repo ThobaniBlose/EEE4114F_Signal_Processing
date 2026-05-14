@@ -52,12 +52,17 @@ void wfp_make_dynamic_accel_ms2(const float *x_g,
                                 uint32_t     n);
 
 #define WFP_FILTFILT_PAD_BP  (12U)    /* reflection padding samples per edge */
+#define WFP_FILTFILT_PAD_HP  (6U)    /* reflection padding for high-pass */
 
 /* Forward-backward (filtfilt) bandpass filter using SOS, in-place.
  * Buffer must be at least n + 2*WFP_FILTFILT_PAD_BP floats. */
 void wfp_filtfilt_bp_order4_inplace(float *x, uint32_t n);
 
-/* Forward-backward (filtfilt) high-pass filter using SOS, in-place. */
+/* Forward-backward (filtfilt) high-pass filter using SOS, in-place.
+ * Buffer must be at least n + 2*WFP_FILTFILT_PAD_HP floats. */
 void wfp_filtfilt_hp_order2_inplace(float *x, uint32_t n);
+
+/* Cumulative trapezoidal integration, in-place. */
+void wfp_cumtrapz_inplace(float *x, uint32_t n, float dt_s);
 
 #endif /* WAVE_FULL_PIPELINE_H */
