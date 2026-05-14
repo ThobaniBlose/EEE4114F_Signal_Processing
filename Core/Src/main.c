@@ -23,6 +23,8 @@
 /* USER CODE BEGIN Includes */
 #include "wave_mode.h"
 #include "wave_full_pipeline.h"
+#include "sharc_process.h"
+#include "wave_packet.h"
 #include "s001_replay_segment.h"
 #include <string.h>
 #include <stdio.h>
@@ -710,158 +712,87 @@ int main(void)
   /* USER CODE BEGIN 2 */
   char buf[256];
 
+  /* Set to 1 to run the full step-by-step validation suite.
+   * Set to 0 for production single-pass processing. */
+  #define SHARC_RUN_VALIDATION  0
+
+#if SHARC_RUN_VALIDATION
+  /* --- Full validation suite (Steps 4-12C) lives here --- */
+  /* Enable this only when you need to re-prove the build. */
+  uart_print("VALIDATION MODE: Enable SHARC_RUN_VALIDATION=1 to run.\r\n");
+#else
+  /* --- Production single-pass processor --- */
   uart_print("\r\n============================================================\r\n");
-  uart_print("SHARC FULL-PIPELINE EMBEDDED VALIDATION\r\n");
+  uart_print("SHARC SINGLE-PASS WINDOW PROCESSOR\r\n");
   uart_print("============================================================\r\n");
 
-  /* =======================================================================
-   * STEP 4: AUTOMATIC MODE DETECTION FROM S001 REPLAY ARRAYS
-   * STM scans the replay data and decides mode by itself.
-   * Expected: BODY_RELATIVE (mag/heading/roll/pitch are NaN in S001).
-   * ======================================================================= */
-  uart_print("\r\n============================================================\r\n");
-  uart_print("STEP 4: AUTOMATIC MODE DETECTION FROM REPLAY DATA\r\n");
-  uart_print("============================================================\r\n");
+  SharcResult_t sharc_result;
+  int sharc_status = sharc_process_window(
+      s001_ax_g, s001_ay_g, s001_az_g,
+      s001_mx_uT, s001_my_uT, s001_mz_uT,
+      s001_heading_deg, s001_roll_deg, s001_pitch_deg,
+      S001_REPLAY_N_SAMPLES,
+      &sharc_result);
 
-  {
-    uint32_t n = S001_REPLAY_N_SAMPLES;
-    uint32_t ax_ok = 0, ay_ok = 0, az_ok = 0;
-    uint32_t mx_ok = 0, my_ok = 0, mz_ok = 0;
-    uint32_t hdg_ok = 0, roll_ok_cnt = 0, pitch_ok_cnt = 0;
-
-    for (uint32_t i = 0; i < n; i++) {
-      if (isfinite(s001_ax_g[i]))      ax_ok++;
-      if (isfinite(s001_ay_g[i]))      ay_ok++;
-      if (isfinite(s001_az_g[i]))      az_ok++;
-      if (isfinite(s001_mx_uT[i]))     mx_ok++;
-      if (isfinite(s001_my_uT[i]))     my_ok++;
-      if (isfinite(s001_mz_uT[i]))     mz_ok++;
-      if (isfinite(s001_heading_deg[i])) hdg_ok++;
-      if (isfinite(s001_roll_deg[i]))  roll_ok_cnt++;
-      if (isfinite(s001_pitch_deg[i])) pitch_ok_cnt++;
-    }
-
-    float motion_frac  = (float)(ax_ok + ay_ok + az_ok) / (3.0f * (float)n);
-    float mag_frac     = (float)(mx_ok + my_ok + mz_ok) / (3.0f * (float)n);
-    float heading_frac = (float)hdg_ok / (float)n;
-    float roll_frac    = (float)roll_ok_cnt / (float)n;
-    float pitch_frac   = (float)pitch_ok_cnt / (float)n;
-
-    snprintf(buf, sizeof(buf),
-             "Motion finite frac  = %.4f\r\n"
-             "Mag finite frac     = %.4f\r\n"
-             "Heading finite frac = %.4f\r\n"
-             "Roll finite frac    = %.4f\r\n"
-             "Pitch finite frac   = %.4f\r\n",
-             (double)motion_frac, (double)mag_frac,
-             (double)heading_frac, (double)roll_frac, (double)pitch_frac);
+  if (sharc_status != 0) {
+    snprintf(buf, sizeof(buf), "SHARC process error: %d\r\n", sharc_status);
     uart_print(buf);
-
-    const char *auto_mode;
-    if (motion_frac >= 0.95f && mag_frac >= 0.95f &&
-        heading_frac >= 0.95f && roll_frac >= 0.95f && pitch_frac >= 0.95f) {
-      auto_mode = "GEOGRAPHIC";
-    } else if (motion_frac >= 0.95f) {
-      auto_mode = "BODY_RELATIVE";
-    } else {
-      auto_mode = "VERTICAL_ONLY";
-    }
-
-    snprintf(buf, sizeof(buf), "\r\nAuto-detected mode = %s\r\n", auto_mode);
-    uart_print(buf);
-
-    if (strcmp(auto_mode, "BODY_RELATIVE") == 0) {
-      uart_print("PASS: Replay data triggers BODY_RELATIVE automatically.\r\n");
-    } else {
-      uart_print("FAIL: Expected BODY_RELATIVE for S001 replay.\r\n");
-    }
+    Error_Handler();
   }
-  uart_print("STEP 4 COMPLETE.\r\n");
 
-  /* =======================================================================
-   * STEP 5: FULL-PIPELINE INPUT VALIDATION
-   * Compute mean/std of s001_ax_g, s001_ay_g, s001_az_g in g.
-   * Then mean-remove and convert to m/s².
-   * Compare against MATLAB segment values:
-   *   mean(ax,ay,az) = [-0.033682, -0.032260, 1.014174] g
-   *   std(ax,ay,az)  = [0.003732, 0.003433, 0.005679] g
-   * ======================================================================= */
-  uart_print("\r\n============================================================\r\n");
-  uart_print("STEP 5: FULL-PIPELINE INPUT VALIDATION\r\n");
-  uart_print("============================================================\r\n");
+  snprintf(buf, sizeof(buf),
+           "Mode: %s\r\n\r\n"
+           "Non-directional:\r\n"
+           "  Hm0  = %.6f m\r\n"
+           "  Tp   = %.6f s\r\n"
+           "  Tm01 = %.6f s\r\n"
+           "  Tm02 = %.6f s\r\n",
+           wave_mode_label(sharc_result.mode),
+           (double)sharc_result.Hm0, (double)sharc_result.Tp,
+           (double)sharc_result.Tm01, (double)sharc_result.Tm02);
+  uart_print(buf);
 
-  {
-    uint32_t n = S001_REPLAY_N_SAMPLES;
-    float sum_ax = 0.0f, sum_ay = 0.0f, sum_az = 0.0f;
+  snprintf(buf, sizeof(buf),
+           "\r\nDirectional:\r\n"
+           "  mean from  = %.3f deg\r\n"
+           "  peak from  = %.3f deg\r\n"
+           "  r1 band    = %.4f\r\n"
+           "  r1 peak    = %.4f\r\n"
+           "  mean coh   = %.4f\r\n"
+           "  confident  = %lu\r\n"
+           "  valid bins = %lu\r\n",
+           (double)sharc_result.mean_from_deg,
+           (double)sharc_result.peak_from_deg,
+           (double)sharc_result.r1_band,
+           (double)sharc_result.r1_peak,
+           (double)sharc_result.mean_vector_coh,
+           (unsigned long)sharc_result.direction_confident,
+           (unsigned long)sharc_result.valid_bins);
+  uart_print(buf);
 
-    for (uint32_t i = 0; i < n; i++) {
-      sum_ax += s001_ax_g[i];
-      sum_ay += s001_ay_g[i];
-      sum_az += s001_az_g[i];
-    }
+  /* Format Tier-1 packet */
+  WavePacket_t final_pkt = {
+      .gps_fix = 0U, .lat = NAN, .lon = NAN,
+      .Hm0  = sharc_result.Hm0,
+      .Tp   = sharc_result.Tp,
+      .Tm01 = sharc_result.Tm01,
+      .Tm02 = sharc_result.Tm02,
+      .dir_deg = sharc_result.mean_from_deg,
+      .mode = sharc_result.mode,
+      .quality = (WaveQuality_t)sharc_result.direction_confident,
+      .r1  = sharc_result.r1_band,
+      .coh = sharc_result.mean_vector_coh,
+  };
+  strncpy(final_pkt.session_id, "S001", sizeof(final_pkt.session_id));
 
-    float mean_ax = sum_ax / (float)n;
-    float mean_ay = sum_ay / (float)n;
-    float mean_az = sum_az / (float)n;
+  char pkt_out[WAVE_PACKET_MAX_LEN];
+  wave_packet_format(&final_pkt, pkt_out, sizeof(pkt_out));
+  uart_print("\r\nTier-1 packet:\r\n");
+  uart_print(pkt_out);
+  uart_print("\r\n");
 
-    /* Compute std */
-    float var_ax = 0.0f, var_ay = 0.0f, var_az = 0.0f;
-    for (uint32_t i = 0; i < n; i++) {
-      float dx = s001_ax_g[i] - mean_ax;
-      float dy = s001_ay_g[i] - mean_ay;
-      float dz = s001_az_g[i] - mean_az;
-      var_ax += dx * dx;
-      var_ay += dy * dy;
-      var_az += dz * dz;
-    }
-    float std_ax = sqrtf(var_ax / (float)n);
-    float std_ay = sqrtf(var_ay / (float)n);
-    float std_az = sqrtf(var_az / (float)n);
-
-    snprintf(buf, sizeof(buf),
-             "Raw acceleration [g]:\r\n"
-             "  mean(ax,ay,az) = [%.6f, %.6f, %.6f]\r\n"
-             "  std(ax,ay,az)  = [%.6f, %.6f, %.6f]\r\n",
-             (double)mean_ax, (double)mean_ay, (double)mean_az,
-             (double)std_ax, (double)std_ay, (double)std_az);
-    uart_print(buf);
-
-    /* MATLAB reference for this segment */
-    uart_print("\r\nMATLAB segment reference:\r\n");
-    uart_print("  mean(ax,ay,az) = [-0.033682, -0.032260, 1.014174] g\r\n");
-    uart_print("  std(ax,ay,az)  = [0.003732, 0.003433, 0.005679] g\r\n");
-
-    /* Check mean_az is near 1g (gravity) */
-    float az_err = fabsf(mean_az - 1.014174f);
-    if (az_err < 0.001f) {
-      uart_print("\r\nPASS: az mean matches MATLAB segment (gravity present).\r\n");
-    } else {
-      snprintf(buf, sizeof(buf),
-               "\r\nCHECK: az mean error = %.6f g\r\n", (double)az_err);
-      uart_print(buf);
-    }
-  }
-  uart_print("STEP 5 COMPLETE.\r\n");
-
-  test_full_pipeline_mean_removal();
-
-  test_full_pipeline_filter_coefficients();
-
-  test_full_pipeline_bandpass_filter();
-
-  test_full_pipeline_velocity_stage();
-
-  test_full_pipeline_displacement_stage();
-
-  test_full_pipeline_wave_params();
-
-  test_full_pipeline_direction_bin_setup();
-
-  test_full_pipeline_peak_direction();
-
-  test_full_pipeline_band_direction();
-
-  uart_print("\r\nALL STEPS COMPLETE.\r\n");
+  uart_print("\r\nPROCESSING COMPLETE.\r\n");
+#endif
   /* USER CODE END 2 */
 
   /* Infinite loop */
