@@ -24,6 +24,7 @@
 #include "wave_mode.h"
 #include "wave_packet.h"
 #include "wave_processor.h"
+#include "wave_full_pipeline.h"
 #include "s001_replay_segment.h"
 #include <string.h>
 #include <stdio.h>
@@ -177,6 +178,40 @@ static void test_full_pipeline_mean_removal(void)
         uart_print("\r\nCHECK: Dynamic mean larger than expected.\r\n");
     }
     uart_print("STEP 6 COMPLETE.\r\n");
+}
+
+static void test_full_pipeline_filter_coefficients(void)
+{
+    char buf[256];
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("STEP 7: FULL-PIPELINE FILTER COEFFICIENT CHECK\r\n");
+    uart_print("============================================================\r\n");
+
+    snprintf(buf, sizeof(buf),
+             "BP b: [%.6e, %.6e, %.6e, %.6e, %.6e]\r\n",
+             (double)wfp_bp_b[0], (double)wfp_bp_b[1], (double)wfp_bp_b[2],
+             (double)wfp_bp_b[3], (double)wfp_bp_b[4]);
+    uart_print(buf);
+
+    snprintf(buf, sizeof(buf),
+             "BP a: [%.6e, %.6e, %.6e, %.6e, %.6e]\r\n",
+             (double)wfp_bp_a[0], (double)wfp_bp_a[1], (double)wfp_bp_a[2],
+             (double)wfp_bp_a[3], (double)wfp_bp_a[4]);
+    uart_print(buf);
+
+    snprintf(buf, sizeof(buf),
+             "HP b: [%.6e, %.6e, %.6e]\r\n",
+             (double)wfp_hp_b[0], (double)wfp_hp_b[1], (double)wfp_hp_b[2]);
+    uart_print(buf);
+
+    snprintf(buf, sizeof(buf),
+             "HP a: [%.6e, %.6e, %.6e]\r\n",
+             (double)wfp_hp_a[0], (double)wfp_hp_a[1], (double)wfp_hp_a[2]);
+    uart_print(buf);
+
+    uart_print("PASS: Filter coefficients loaded.\r\n");
+    uart_print("STEP 7 COMPLETE.\r\n");
 }
 /* USER CODE END 0 */
 
@@ -516,6 +551,8 @@ int main(void)
   uart_print("STEP 5 COMPLETE.\r\n");
 
   test_full_pipeline_mean_removal();
+
+  test_full_pipeline_filter_coefficients();
 
   uart_print("\r\nALL STEPS COMPLETE.\r\n");
   /* USER CODE END 2 */
