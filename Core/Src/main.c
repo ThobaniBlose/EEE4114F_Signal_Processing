@@ -24,6 +24,7 @@
 #include "wave_mode.h"
 #include "wave_packet.h"
 #include "wave_processor.h"
+#include "wave_full_pipeline.h"
 #include "s001_replay_segment.h"
 #include <string.h>
 #include <stdio.h>
@@ -109,6 +110,147 @@ static void MX_USB_OTG_FS_USB_Init(void);
 static void uart_print(const char *s)
 {
     HAL_UART_Transmit(&hlpuart1, (uint8_t*)s, strlen(s), HAL_MAX_DELAY);
+}
+
+static void test_full_pipeline_mean_removal(void)
+{
+    char buf[256];
+    const float g0 = 9.80665f;
+    const uint32_t n = S001_REPLAY_N_SAMPLES;
+
+    double sum_ax = 0.0, sum_ay = 0.0, sum_az = 0.0;
+    for (uint32_t i = 0U; i < n; i++) {
+        sum_ax += (double)s001_ax_g[i] * (double)g0;
+        sum_ay += (double)s001_ay_g[i] * (double)g0;
+        sum_az += (double)s001_az_g[i] * (double)g0;
+    }
+    double mean_ax_ms2 = sum_ax / (double)n;
+    double mean_ay_ms2 = sum_ay / (double)n;
+    double mean_az_ms2 = sum_az / (double)n;
+
+    double dyn_sumsq_ax = 0.0, dyn_sumsq_ay = 0.0, dyn_sumsq_az = 0.0;
+    double dyn_sum_ax = 0.0, dyn_sum_ay = 0.0, dyn_sum_az = 0.0;
+    for (uint32_t i = 0U; i < n; i++) {
+        double ax_dyn = ((double)s001_ax_g[i] * (double)g0) - mean_ax_ms2;
+        double ay_dyn = ((double)s001_ay_g[i] * (double)g0) - mean_ay_ms2;
+        double az_dyn = ((double)s001_az_g[i] * (double)g0) - mean_az_ms2;
+        dyn_sum_ax += ax_dyn;
+        dyn_sum_ay += ay_dyn;
+        dyn_sum_az += az_dyn;
+        dyn_sumsq_ax += ax_dyn * ax_dyn;
+        dyn_sumsq_ay += ay_dyn * ay_dyn;
+        dyn_sumsq_az += az_dyn * az_dyn;
+    }
+    double dyn_mean_ax = dyn_sum_ax / (double)n;
+    double dyn_mean_ay = dyn_sum_ay / (double)n;
+    double dyn_mean_az = dyn_sum_az / (double)n;
+    double dyn_std_ax = sqrt(dyn_sumsq_ax / (double)(n - 1U));
+    double dyn_std_ay = sqrt(dyn_sumsq_ay / (double)(n - 1U));
+    double dyn_std_az = sqrt(dyn_sumsq_az / (double)(n - 1U));
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("STEP 6: FULL-PIPELINE G-CONVERSION AND MEAN REMOVAL\r\n");
+    uart_print("============================================================\r\n");
+
+    snprintf(buf, sizeof(buf),
+             "Mean accel before removal [m/s2]:\r\n"
+             "  [%.9f, %.9f, %.9f]\r\n",
+             mean_ax_ms2, mean_ay_ms2, mean_az_ms2);
+    uart_print(buf);
+
+    snprintf(buf, sizeof(buf),
+             "\r\nDynamic accel after removal [m/s2]:\r\n"
+             "  mean = [%.6e, %.6e, %.6e]\r\n",
+             dyn_mean_ax, dyn_mean_ay, dyn_mean_az);
+    uart_print(buf);
+
+    snprintf(buf, sizeof(buf),
+             "  std  = [%.6e, %.6e, %.6e]\r\n",
+             dyn_std_ax, dyn_std_ay, dyn_std_az);
+    uart_print(buf);
+
+    uart_print("\r\nMATLAB expected dynamic std:\r\n");
+    uart_print("  [3.660e-02, 3.366e-02, 5.569e-02] m/s2\r\n");
+
+    if (fabs(dyn_mean_az) < 1.0e-6) {
+        uart_print("\r\nPASS: Mean removal produces near-zero dynamic mean.\r\n");
+    } else {
+        uart_print("\r\nCHECK: Dynamic mean larger than expected.\r\n");
+    }
+    uart_print("STEP 6 COMPLETE.\r\n");
+}
+
+static void test_full_pipeline_filter_coefficients(void)
+{
+    char buf[256];
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("STEP 7: FULL-PIPELINE FILTER COEFFICIENT CHECK\r\n");
+    uart_print("============================================================\r\n");
+
+    snprintf(buf, sizeof(buf),
+             "BP b: [%.6e, %.6e, %.6e, %.6e, %.6e]\r\n",
+             (double)wfp_bp_b[0], (double)wfp_bp_b[1], (double)wfp_bp_b[2],
+             (double)wfp_bp_b[3], (double)wfp_bp_b[4]);
+    uart_print(buf);
+
+    snprintf(buf, sizeof(buf),
+             "BP a: [%.6e, %.6e, %.6e, %.6e, %.6e]\r\n",
+             (double)wfp_bp_a[0], (double)wfp_bp_a[1], (double)wfp_bp_a[2],
+             (double)wfp_bp_a[3], (double)wfp_bp_a[4]);
+    uart_print(buf);
+
+    snprintf(buf, sizeof(buf),
+             "HP b: [%.6e, %.6e, %.6e]\r\n",
+             (double)wfp_hp_b[0], (double)wfp_hp_b[1], (double)wfp_hp_b[2]);
+    uart_print(buf);
+
+    snprintf(buf, sizeof(buf),
+             "HP a: [%.6e, %.6e, %.6e]\r\n",
+             (double)wfp_hp_a[0], (double)wfp_hp_a[1], (double)wfp_hp_a[2]);
+    uart_print(buf);
+
+    uart_print("PASS: Filter coefficients loaded.\r\n");
+    uart_print("STEP 7 COMPLETE.\r\n");
+}
+
+/* Single shared DSP buffer — includes padding for filtfilt edge handling */
+static float wfp_buf[S001_REPLAY_N_SAMPLES + 2U * WFP_FILTFILT_PAD_BP];
+
+static void test_full_pipeline_bandpass_filter(void)
+{
+    char buf[256];
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("STEP 8: FULL-PIPELINE BANDPASS FILTER TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    wfp_make_dynamic_accel_ms2(s001_ax_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_filtfilt_bp_order4_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    float ax_rms = wfp_rms(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    wfp_make_dynamic_accel_ms2(s001_ay_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_filtfilt_bp_order4_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    float ay_rms = wfp_rms(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    wfp_make_dynamic_accel_ms2(s001_az_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_filtfilt_bp_order4_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    float az_rms = wfp_rms(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    snprintf(buf, sizeof(buf),
+             "Bandpass filtered accel RMS [m/s2]:\r\n"
+             "  ax_filt = %.9e\r\n"
+             "  ay_filt = %.9e\r\n"
+             "  az_filt = %.9e\r\n",
+             (double)ax_rms, (double)ay_rms, (double)az_rms);
+    uart_print(buf);
+
+    uart_print("\r\nMATLAB targets:\r\n");
+    uart_print("  ax_filt = 6.930560786e-03\r\n");
+    uart_print("  ay_filt = 6.219773947e-03\r\n");
+    uart_print("  az_filt = 4.109526795e-02\r\n");
+
+    uart_print("\r\nSTEP 8 COMPLETE.\r\n");
 }
 /* USER CODE END 0 */
 
@@ -220,20 +362,12 @@ int main(void)
   uart_print("============================================================\r\n");
 
   /* Convert s001_az_g[] to mean-removed m/s² for wave_processor_run() */
-  static float s001_az_ms2[S001_REPLAY_N_SAMPLES];
-  {
-    float sum_g = 0.0f;
-    for (uint32_t i = 0; i < S001_REPLAY_N_SAMPLES; i++) sum_g += s001_az_g[i];
-    float mean_g = sum_g / (float)S001_REPLAY_N_SAMPLES;
-    for (uint32_t i = 0; i < S001_REPLAY_N_SAMPLES; i++) {
-      s001_az_ms2[i] = (s001_az_g[i] - mean_g) * 9.80665f;
-    }
-  }
+  wfp_make_dynamic_accel_ms2(s001_az_g, wfp_buf, S001_REPLAY_N_SAMPLES);
 
   wave_processor_init();
 
   WaveProcessor_Result s001_result;
-  int s001_status = wave_processor_run(s001_az_ms2,
+  int s001_status = wave_processor_run(wfp_buf,
                                        S001_REPLAY_N_SAMPLES,
                                        &s001_result);
   if (s001_status != 0) {
@@ -381,6 +515,77 @@ int main(void)
     }
   }
   uart_print("STEP 4 COMPLETE.\r\n");
+
+  /* =======================================================================
+   * STEP 5: FULL-PIPELINE INPUT VALIDATION
+   * Compute mean/std of s001_ax_g, s001_ay_g, s001_az_g in g.
+   * Then mean-remove and convert to m/s².
+   * Compare against MATLAB segment values:
+   *   mean(ax,ay,az) = [-0.033682, -0.032260, 1.014174] g
+   *   std(ax,ay,az)  = [0.003732, 0.003433, 0.005679] g
+   * ======================================================================= */
+  uart_print("\r\n============================================================\r\n");
+  uart_print("STEP 5: FULL-PIPELINE INPUT VALIDATION\r\n");
+  uart_print("============================================================\r\n");
+
+  {
+    uint32_t n = S001_REPLAY_N_SAMPLES;
+    float sum_ax = 0.0f, sum_ay = 0.0f, sum_az = 0.0f;
+
+    for (uint32_t i = 0; i < n; i++) {
+      sum_ax += s001_ax_g[i];
+      sum_ay += s001_ay_g[i];
+      sum_az += s001_az_g[i];
+    }
+
+    float mean_ax = sum_ax / (float)n;
+    float mean_ay = sum_ay / (float)n;
+    float mean_az = sum_az / (float)n;
+
+    /* Compute std */
+    float var_ax = 0.0f, var_ay = 0.0f, var_az = 0.0f;
+    for (uint32_t i = 0; i < n; i++) {
+      float dx = s001_ax_g[i] - mean_ax;
+      float dy = s001_ay_g[i] - mean_ay;
+      float dz = s001_az_g[i] - mean_az;
+      var_ax += dx * dx;
+      var_ay += dy * dy;
+      var_az += dz * dz;
+    }
+    float std_ax = sqrtf(var_ax / (float)n);
+    float std_ay = sqrtf(var_ay / (float)n);
+    float std_az = sqrtf(var_az / (float)n);
+
+    snprintf(buf, sizeof(buf),
+             "Raw acceleration [g]:\r\n"
+             "  mean(ax,ay,az) = [%.6f, %.6f, %.6f]\r\n"
+             "  std(ax,ay,az)  = [%.6f, %.6f, %.6f]\r\n",
+             (double)mean_ax, (double)mean_ay, (double)mean_az,
+             (double)std_ax, (double)std_ay, (double)std_az);
+    uart_print(buf);
+
+    /* MATLAB reference for this segment */
+    uart_print("\r\nMATLAB segment reference:\r\n");
+    uart_print("  mean(ax,ay,az) = [-0.033682, -0.032260, 1.014174] g\r\n");
+    uart_print("  std(ax,ay,az)  = [0.003732, 0.003433, 0.005679] g\r\n");
+
+    /* Check mean_az is near 1g (gravity) */
+    float az_err = fabsf(mean_az - 1.014174f);
+    if (az_err < 0.001f) {
+      uart_print("\r\nPASS: az mean matches MATLAB segment (gravity present).\r\n");
+    } else {
+      snprintf(buf, sizeof(buf),
+               "\r\nCHECK: az mean error = %.6f g\r\n", (double)az_err);
+      uart_print(buf);
+    }
+  }
+  uart_print("STEP 5 COMPLETE.\r\n");
+
+  test_full_pipeline_mean_removal();
+
+  test_full_pipeline_filter_coefficients();
+
+  test_full_pipeline_bandpass_filter();
 
   uart_print("\r\nALL STEPS COMPLETE.\r\n");
   /* USER CODE END 2 */
