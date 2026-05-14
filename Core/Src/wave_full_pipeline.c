@@ -185,12 +185,58 @@ void wfp_filtfilt_bp_order4_inplace(float *x, uint32_t n)
 
 /* ---------------------------------------------------------------------------
  * wfp_filtfilt_hp_order2_inplace
- * Simple forward-backward high-pass (no padding yet).
+ * MATLAB-like filtfilt with reflection padding for high-pass.
  * --------------------------------------------------------------------------- */
 void wfp_filtfilt_hp_order2_inplace(float *x, uint32_t n)
 {
-    sos_filter_inplace_zi(x, n, wfp_hp_sos, 1U, wfp_hp_gain);
-    reverse_float_array(x, n);
-    sos_filter_inplace_zi(x, n, wfp_hp_sos, 1U, wfp_hp_gain);
-    reverse_float_array(x, n);
+    const uint32_t pad = WFP_FILTFILT_PAD_HP;
+    const uint32_t m   = n + 2U * pad;
+
+    /* Move original data to make room for left padding */
+    for (uint32_t i = n; i > 0U; i--) {
+        x[pad + i - 1U] = x[i - 1U];
+    }
+
+    /* Left reflection */
+    float x_first = x[pad];
+    for (uint32_t i = 0U; i < pad; i++) {
+        x[i] = 2.0f * x_first - x[pad + pad - i];
+    }
+
+    /* Right reflection */
+    float x_last = x[pad + n - 1U];
+    for (uint32_t i = 0U; i < pad; i++) {
+        x[pad + n + i] = 2.0f * x_last - x[pad + n - 2U - i];
+    }
+
+    /* Forward + backward SOS filter */
+    sos_filter_inplace_zi(x, m, wfp_hp_sos, 1U, wfp_hp_gain);
+    reverse_float_array(x, m);
+    sos_filter_inplace_zi(x, m, wfp_hp_sos, 1U, wfp_hp_gain);
+    reverse_float_array(x, m);
+
+    /* Remove padding */
+    for (uint32_t i = 0U; i < n; i++) {
+        x[i] = x[pad + i];
+    }
+}
+
+/* ---------------------------------------------------------------------------
+ * wfp_cumtrapz_inplace — cumulative trapezoidal integration
+ * Matches MATLAB cumtrapz(t, x) with uniform dt.
+ * --------------------------------------------------------------------------- */
+void wfp_cumtrapz_inplace(float *x, uint32_t n, float dt_s)
+{
+    if (n == 0U) return;
+
+    float prev_input = x[0];
+    float integral   = 0.0f;
+    x[0] = 0.0f;
+
+    for (uint32_t i = 1U; i < n; i++) {
+        float current_input = x[i];
+        integral += 0.5f * dt_s * (prev_input + current_input);
+        x[i] = integral;
+        prev_input = current_input;
+    }
 }

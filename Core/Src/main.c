@@ -252,6 +252,233 @@ static void test_full_pipeline_bandpass_filter(void)
 
     uart_print("\r\nSTEP 8 COMPLETE.\r\n");
 }
+
+static void test_full_pipeline_velocity_stage(void)
+{
+    char buf[256];
+    const float dt_s = 1.0f / WFP_FS_HZ;
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("STEP 9: FULL-PIPELINE VELOCITY RECOVERY TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    /* vx_body from ax */
+    wfp_make_dynamic_accel_ms2(s001_ax_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_filtfilt_bp_order4_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_cumtrapz_inplace(wfp_buf, S001_REPLAY_N_SAMPLES, dt_s);
+    wfp_filtfilt_hp_order2_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    float vx_rms = wfp_rms(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    /* vy_body from ay */
+    wfp_make_dynamic_accel_ms2(s001_ay_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_filtfilt_bp_order4_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_cumtrapz_inplace(wfp_buf, S001_REPLAY_N_SAMPLES, dt_s);
+    wfp_filtfilt_hp_order2_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    float vy_rms = wfp_rms(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    /* vz from az */
+    wfp_make_dynamic_accel_ms2(s001_az_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_filtfilt_bp_order4_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_cumtrapz_inplace(wfp_buf, S001_REPLAY_N_SAMPLES, dt_s);
+    wfp_filtfilt_hp_order2_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    float vz_rms = wfp_rms(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    snprintf(buf, sizeof(buf),
+             "Recovered velocity RMS [m/s]:\r\n"
+             "  vx_body = %.9e\r\n"
+             "  vy_body = %.9e\r\n"
+             "  vz      = %.9e\r\n",
+             (double)vx_rms, (double)vy_rms, (double)vz_rms);
+    uart_print(buf);
+
+    uart_print("\r\nMATLAB targets:\r\n");
+    uart_print("  vx_body = 1.226652456e-02\r\n");
+    uart_print("  vy_body = 1.188385420e-02\r\n");
+    uart_print("  vz      = 1.019634046e-01\r\n");
+
+    uart_print("\r\nSTEP 9 COMPLETE.\r\n");
+}
+
+static float local_max_abs_float(const float *x, uint32_t n)
+{
+    float max_abs = 0.0f;
+    for (uint32_t i = 0U; i < n; i++) {
+        float a = fabsf(x[i]);
+        if (a > max_abs) max_abs = a;
+    }
+    return max_abs;
+}
+
+static void test_full_pipeline_displacement_stage(void)
+{
+    char buf[256];
+    const float dt_s = 1.0f / WFP_FS_HZ;
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("STEP 10: FULL-PIPELINE VERTICAL DISPLACEMENT TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    /* az_dyn → bandpass → integrate → HP → integrate → HP = eta */
+    wfp_make_dynamic_accel_ms2(s001_az_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_filtfilt_bp_order4_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_cumtrapz_inplace(wfp_buf, S001_REPLAY_N_SAMPLES, dt_s);
+    wfp_filtfilt_hp_order2_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_cumtrapz_inplace(wfp_buf, S001_REPLAY_N_SAMPLES, dt_s);
+    wfp_filtfilt_hp_order2_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    float eta_rms     = wfp_rms(wfp_buf, S001_REPLAY_N_SAMPLES);
+    float eta_max_abs = local_max_abs_float(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    snprintf(buf, sizeof(buf),
+             "Recovered vertical displacement:\r\n"
+             "  eta RMS     = %.9e m\r\n"
+             "  eta max abs = %.9e m\r\n",
+             (double)eta_rms, (double)eta_max_abs);
+    uart_print(buf);
+
+    uart_print("\r\nMATLAB targets:\r\n");
+    uart_print("  eta RMS     = 2.680921055e-01 m\r\n");
+    uart_print("  eta max abs = 6.595198828e-01 m\r\n");
+
+    uart_print("\r\nSTEP 10 COMPLETE.\r\n");
+}
+
+static void test_full_pipeline_wave_params(void)
+{
+    char buf[256];
+    const float dt_s = 1.0f / WFP_FS_HZ;
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("STEP 11: FULL-PIPELINE NON-DIRECTIONAL WAVE PARAMETERS\r\n");
+    uart_print("============================================================\r\n");
+
+    /* Reconstruct eta into wfp_buf (same chain as Step 10) */
+    wfp_make_dynamic_accel_ms2(s001_az_g, wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_filtfilt_bp_order4_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_cumtrapz_inplace(wfp_buf, S001_REPLAY_N_SAMPLES, dt_s);
+    wfp_filtfilt_hp_order2_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+    wfp_cumtrapz_inplace(wfp_buf, S001_REPLAY_N_SAMPLES, dt_s);
+    wfp_filtfilt_hp_order2_inplace(wfp_buf, S001_REPLAY_N_SAMPLES);
+
+    /* Detrend eta (remove any residual DC) */
+    {
+        double sum = 0.0;
+        for (uint32_t i = 0; i < S001_REPLAY_N_SAMPLES; i++) sum += (double)wfp_buf[i];
+        float mean_eta = (float)(sum / (double)S001_REPLAY_N_SAMPLES);
+        for (uint32_t i = 0; i < S001_REPLAY_N_SAMPLES; i++) wfp_buf[i] -= mean_eta;
+    }
+
+    /* Welch PSD of eta — direct DFT on wave-band bins only.
+     * Settings: win=8192, hop=4096, nfft=16384, wave band 0.04-0.40 Hz */
+    const uint32_t win_len = WFP_WELCH_WIN_LEN;    /* 8192 */
+    const uint32_t hop_len = WFP_WELCH_NOVERLAP;   /* 4096 */
+    const uint32_t nfft    = WFP_WELCH_NFFT;       /* 16384 */
+    const float    df      = WFP_FS_HZ / (float)nfft;
+    const uint32_t k_lo    = (uint32_t)ceilf(WFP_WAVE_LO_HZ / df);
+    const uint32_t k_hi    = (uint32_t)floorf(WFP_WAVE_HI_HZ / df);
+
+    /* Hann window (periodic) — compute on the fly to save static RAM */
+    /* PSD accumulator — reuse a portion of memory after eta */
+    static float psd_acc[820];  /* enough for k_hi - k_lo + 1 bins (max ~66) */
+    for (uint32_t k = 0; k < 820; k++) psd_acc[k] = 0.0f;
+
+    /* Hann power correction */
+    double hann_pwr_sum = 0.0;
+    for (uint32_t n = 0; n < win_len; n++) {
+        double w = 0.5 * (1.0 - cos(2.0 * M_PI * (double)n / (double)win_len));
+        hann_pwr_sum += w * w;
+    }
+    float hann_pwr = (float)(hann_pwr_sum / (double)win_len);
+
+    uint32_t n_segs = 0;
+    uint32_t last_start = S001_REPLAY_N_SAMPLES - win_len;
+
+    for (uint32_t start = 0; start <= last_start; start += hop_len) {
+        for (uint32_t k = k_lo; k <= k_hi; k++) {
+            float step = 2.0f * (float)M_PI * (float)k / (float)nfft;
+            float c_step = cosf(step);
+            float s_step = sinf(step);
+            float c = 1.0f, s = 0.0f;
+            float re = 0.0f, im = 0.0f;
+
+            for (uint32_t n = 0; n < win_len; n++) {
+                /* Apply Hann window inline */
+                float w = 0.5f * (1.0f - cosf(2.0f * (float)M_PI
+                                               * (float)n / (float)win_len));
+                float x = w * wfp_buf[start + n];
+                re += x * c;
+                im -= x * s;
+                float c_new = c * c_step - s * s_step;
+                float s_new = s * c_step + c * s_step;
+                c = c_new;
+                s = s_new;
+            }
+
+            float S_k = 2.0f * (re*re + im*im)
+                        / ((float)win_len * hann_pwr * WFP_FS_HZ);
+            psd_acc[k - k_lo] += S_k;
+        }
+        n_segs++;
+    }
+
+    /* Spectral moments with trapezoidal weights */
+    float m0 = 0.0f, m1 = 0.0f, m2 = 0.0f;
+    float S_peak = 0.0f;
+    uint32_t k_peak = k_lo;
+
+    for (uint32_t k = k_lo; k <= k_hi; k++) {
+        float f_k = (float)k * df;
+        float S_k = psd_acc[k - k_lo] / (float)n_segs;
+        float tw  = (k == k_lo || k == k_hi) ? 0.5f : 1.0f;
+        m0 += tw * S_k * df;
+        m1 += tw * f_k * S_k * df;
+        m2 += tw * f_k * f_k * S_k * df;
+        if (S_k > S_peak) { S_peak = S_k; k_peak = k; }
+    }
+
+    float Hm0  = 4.0f * sqrtf(m0);
+    float fp   = (float)k_peak * df;
+    float Tp   = (fp > 0.0f) ? 1.0f / fp : 0.0f;
+    float Tm01 = (m1 > 0.0f) ? m0 / m1 : 0.0f;
+    float Tm02 = (m2 > 0.0f) ? sqrtf(m0 / m2) : 0.0f;
+
+    snprintf(buf, sizeof(buf),
+             "Wave parameters from eta:\r\n"
+             "  Hm0  = %.6f m\r\n"
+             "  fp   = %.6f Hz\r\n"
+             "  Tp   = %.6f s\r\n"
+             "  Tm01 = %.6f s\r\n"
+             "  Tm02 = %.6f s\r\n"
+             "  segs = %lu\r\n",
+             (double)Hm0, (double)fp, (double)Tp,
+             (double)Tm01, (double)Tm02, (unsigned long)n_segs);
+    uart_print(buf);
+
+    uart_print("\r\nMATLAB golden (truncated full-pipeline):\r\n");
+    uart_print("  Hm0  = 1.013638 m\r\n");
+    uart_print("  fp   = 0.054932 Hz\r\n");
+    uart_print("  Tp   = 18.204444 s\r\n");
+    uart_print("  Tm01 = 16.606034 s\r\n");
+    uart_print("  Tm02 = 16.372861 s\r\n");
+
+    float err_Hm0  = 100.0f * fabsf((Hm0  - 1.013638f)  / 1.013638f);
+    float err_Tp   = 100.0f * fabsf((Tp   - 18.204444f) / 18.204444f);
+    float err_Tm01 = 100.0f * fabsf((Tm01 - 16.606034f) / 16.606034f);
+    float err_Tm02 = 100.0f * fabsf((Tm02 - 16.372861f) / 16.372861f);
+
+    snprintf(buf, sizeof(buf),
+             "\r\nErrors: Hm0=%.3f%%  Tp=%.3f%%  Tm01=%.3f%%  Tm02=%.3f%%\r\n",
+             (double)err_Hm0, (double)err_Tp,
+             (double)err_Tm01, (double)err_Tm02);
+    uart_print(buf);
+
+    if (err_Hm0 < 5.0f && err_Tp < 5.0f && err_Tm01 < 5.0f && err_Tm02 < 5.0f) {
+        uart_print("\r\nPASS: Full-pipeline wave params match MATLAB golden.\r\n");
+    } else {
+        uart_print("\r\nCHECK: Full-pipeline wave params differ from MATLAB.\r\n");
+    }
+    uart_print("STEP 11 COMPLETE.\r\n");
+}
 /* USER CODE END 0 */
 
 /**
@@ -586,6 +813,12 @@ int main(void)
   test_full_pipeline_filter_coefficients();
 
   test_full_pipeline_bandpass_filter();
+
+  test_full_pipeline_velocity_stage();
+
+  test_full_pipeline_displacement_stage();
+
+  test_full_pipeline_wave_params();
 
   uart_print("\r\nALL STEPS COMPLETE.\r\n");
   /* USER CODE END 2 */
