@@ -18,12 +18,12 @@
 #endif
 
 /* ---------------------------------------------------------------------------
- * Internal buffers — static to avoid stack pressure.
+ * Internal buffers — shared with main.c for ATP tests via extern.
  * buf_a: primary working buffer (reused for each channel)
  * buf_eta: stores eta for cross-spectral computation
  * --------------------------------------------------------------------------- */
-static float s_buf_a[32768U + 2U * WFP_FILTFILT_PAD_BP];
-static float s_buf_eta[32768U + 2U * WFP_FILTFILT_PAD_BP];
+float s_buf_a[32768U + 2U * WFP_FILTFILT_PAD_BP];
+float s_buf_eta[32768U + 2U * WFP_FILTFILT_PAD_BP];
 
 /* Cross-spectral bin accumulators */
 static WfpCrossBin_t s_eta_x_bins[WFP_WAVE_N_BINS];
