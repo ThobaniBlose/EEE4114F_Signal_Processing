@@ -25,6 +25,7 @@
 #include "wave_full_pipeline.h"
 #include "sharc_process.h"
 #include "wave_packet.h"
+#include "direction_processor.h"
 #include "s001_replay_segment.h"
 #include <string.h>
 #include <stdio.h>
@@ -215,12 +216,23 @@ static void test_full_pipeline_filter_coefficients(void)
 }
 
 /* Single shared DSP buffer — includes padding for filtfilt edge handling */
-static float wfp_buf[S001_REPLAY_N_SAMPLES + 2U * WFP_FILTFILT_PAD_BP];
-/* Second buffer for eta (needed during cross-spectral computation) */
-static float wfp_eta_buf[S001_REPLAY_N_SAMPLES + 2U * WFP_FILTFILT_PAD_BP];
+/* These are defined in sharc_process.c — reuse them here for ATP tests */
+extern float s_buf_a[];
+extern float s_buf_eta[];
+#define wfp_buf     s_buf_a
+#define wfp_eta_buf s_buf_eta
 /* Cross-spectral bin arrays for band direction */
 static WfpCrossBin_t wfp_eta_x_bins[WFP_WAVE_N_BINS];
 static WfpCrossBin_t wfp_eta_y_bins[WFP_WAVE_N_BINS];
+
+/* ATP4B: band direction over 0.08-0.40 Hz */
+#define ATP4_K_MIN     (14U)
+#define ATP4_K_MAX     (65U)
+#define ATP4_N_BINS    (ATP4_K_MAX - ATP4_K_MIN + 1U)
+static float atp4_eta_buf[WFP_WELCH_WIN_LEN];
+static float atp4_h_buf[WFP_WELCH_WIN_LEN];
+static WfpCrossBin_t atp4_eta_north_bins[ATP4_N_BINS];
+static WfpCrossBin_t atp4_eta_east_bins[ATP4_N_BINS];
 
 static void test_full_pipeline_bandpass_filter(void)
 {
@@ -792,6 +804,275 @@ int main(void)
   uart_print("\r\n");
 
   uart_print("\r\nPROCESSING COMPLETE.\r\n");
+
+  /* =======================================================================
+   * ATP3: BODY-FRAME TO NORTH/EAST ROTATION TEST
+   * Uses direction_processor_rotate_horizontal() — the same function
+   * that the geographic directional branch uses.
+   * ======================================================================= */
+  uart_print("\r\n============================================================\r\n");
+  uart_print("ATP3: BODY-FRAME TO NORTH/EAST ROTATION TEST\r\n");
+  uart_print("============================================================\r\n");
+
+  {
+    #define ATP3_N  5U
+    float atp3_ax[ATP3_N]  = {1.0f, 1.0f, 1.0f, 0.0f, 0.0f};
+    float atp3_ay[ATP3_N]  = {0.0f, 0.0f, 0.0f, 1.0f, 1.0f};
+    float atp3_hdg[ATP3_N] = {0.0f, 45.0f, 90.0f, 0.0f, 90.0f};
+    float atp3_north[ATP3_N];
+    float atp3_east[ATP3_N];
+
+    DirectionProcessor_Result atp3_dir;
+    direction_processor_rotate_horizontal(
+        atp3_ax, atp3_ay, atp3_hdg,
+        atp3_north, atp3_east,
+        ATP3_N, &atp3_dir);
+
+    for (uint32_t i = 0; i < ATP3_N; i++) {
+      snprintf(buf, sizeof(buf),
+               "  Case %lu: ax=%.1f ay=%.1f hdg=%.1f -> N=%.6f E=%.6f\r\n",
+               (unsigned long)(i + 1U),
+               (double)atp3_ax[i], (double)atp3_ay[i], (double)atp3_hdg[i],
+               (double)atp3_north[i], (double)atp3_east[i]);
+      uart_print(buf);
+    }
+    uart_print("ATP3 COMPLETE.\r\n");
+  }
+
+  /* =======================================================================
+   * ATP4A: SYNTHETIC HEADING-REFERENCED PEAK DIRECTION TEST
+   * ======================================================================= */
+  {
+    const uint32_t n = S001_REPLAY_N_SAMPLES;
+    const float fs = WFP_FS_HZ;
+    const uint32_t k_peak = 20U;
+    const float f0 = (float)k_peak * WFP_DF_HZ;
+    const float known_from_geo_deg = 60.0f;
+    const float heading_deg_val = 30.0f;
+    const float known_from_body_deg = known_from_geo_deg - heading_deg_val;
+    const float eta_amp = 0.50f;
+    const float h_amp   = 0.15f;
+
+    WfpCrossBin_t eta_north, eta_east;
+    WfpDirectionPeak_t dir_peak;
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("ATP4A: SYNTHETIC HEADING-REFERENCED PEAK DIRECTION TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    snprintf(buf, sizeof(buf),
+             "Synthetic case:\r\n"
+             "  known geo coming-from = %.1f deg\r\n"
+             "  heading               = %.1f deg\r\n"
+             "  expected body-rel     = %.1f deg\r\n"
+             "  k_peak = %lu  f0 = %.6f Hz\r\n",
+             (double)known_from_geo_deg, (double)heading_deg_val,
+             (double)known_from_body_deg,
+             (unsigned long)k_peak, (double)f0);
+    uart_print(buf);
+
+    /* Build eta + North channel */
+    for (uint32_t i = 0U; i < n; i++) {
+      float t = (float)i / fs;
+      float phase = 2.0f * (float)M_PI * f0 * t;
+      float vx_body = h_amp * sinf(phase) * cosf(known_from_body_deg * (float)M_PI / 180.0f);
+      float vy_body = h_amp * sinf(phase) * sinf(known_from_body_deg * (float)M_PI / 180.0f);
+      float hdg = heading_deg_val * (float)M_PI / 180.0f;
+      wfp_eta_buf[i] = eta_amp * cosf(phase);
+      wfp_buf[i] = vx_body * cosf(hdg) - vy_body * sinf(hdg);
+    }
+    wfp_cross_bin_eta_h(wfp_eta_buf, wfp_buf, n, k_peak, &eta_north);
+
+    /* Build East channel */
+    for (uint32_t i = 0U; i < n; i++) {
+      float t = (float)i / fs;
+      float phase = 2.0f * (float)M_PI * f0 * t;
+      float vx_body = h_amp * sinf(phase) * cosf(known_from_body_deg * (float)M_PI / 180.0f);
+      float vy_body = h_amp * sinf(phase) * sinf(known_from_body_deg * (float)M_PI / 180.0f);
+      float hdg = heading_deg_val * (float)M_PI / 180.0f;
+      wfp_buf[i] = vx_body * sinf(hdg) + vy_body * cosf(hdg);
+    }
+    wfp_cross_bin_eta_h(wfp_eta_buf, wfp_buf, n, k_peak, &eta_east);
+
+    wfp_direction_peak_from_cross(&eta_north, &eta_east, &dir_peak);
+
+    float err_deg = dir_peak.peak_from_deg - known_from_geo_deg;
+    while (err_deg > 180.0f)  err_deg -= 360.0f;
+    while (err_deg < -180.0f) err_deg += 360.0f;
+
+    snprintf(buf, sizeof(buf),
+             "\r\nATP4A result:\r\n"
+             "  estimated coming-from = %.6f deg\r\n"
+             "  known reference       = %.6f deg\r\n"
+             "  error                 = %.6f deg\r\n"
+             "  r1 peak               = %.6f\r\n"
+             "  vector coherence      = %.6f\r\n",
+             (double)dir_peak.peak_from_deg,
+             (double)known_from_geo_deg,
+             (double)err_deg,
+             (double)dir_peak.r1_peak,
+             (double)dir_peak.vector_coh_peak);
+    uart_print(buf);
+
+    uart_print("ATP4A COMPLETE.\r\n");
+  }
+
+  /* =======================================================================
+   * ATP4B: SYNTHETIC HEADING-REFERENCED BAND-INTEGRATED DIRECTION TEST
+   * Tests geographic directional branch over trusted 0.08-0.40 Hz band.
+   * ======================================================================= */
+  {
+    const uint32_t n = WFP_WELCH_WIN_LEN;  /* 8192 samples */
+    const float fs = WFP_FS_HZ;
+    const uint32_t k_peak = 20U;
+    const float f0 = (float)k_peak * WFP_DF_HZ;
+    const float known_from_geo_deg = 60.0f;
+    const float heading_deg_val = 30.0f;
+    const float known_from_body_deg = known_from_geo_deg - heading_deg_val;
+    const float eta_amp = 0.50f;
+    const float h_amp   = 0.15f;
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("ATP4B: SYNTHETIC HEADING-REFERENCED BAND DIRECTION TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    snprintf(buf, sizeof(buf),
+             "Synthetic case:\r\n"
+             "  known geo coming-from = %.1f deg\r\n"
+             "  heading               = %.1f deg\r\n"
+             "  trusted band          = 0.08 to 0.40 Hz\r\n"
+             "  k range               = %lu to %lu\r\n"
+             "  k_peak = %lu  f0 = %.6f Hz\r\n",
+             (double)known_from_geo_deg, (double)heading_deg_val,
+             (unsigned long)ATP4_K_MIN, (unsigned long)ATP4_K_MAX,
+             (unsigned long)k_peak, (double)f0);
+    uart_print(buf);
+
+    /* Build eta + North channel */
+    for (uint32_t i = 0U; i < n; i++) {
+      float t = (float)i / fs;
+      float phase = 2.0f * (float)M_PI * f0 * t;
+      float vx_body = h_amp * sinf(phase) * cosf(known_from_body_deg * (float)M_PI / 180.0f);
+      float vy_body = h_amp * sinf(phase) * sinf(known_from_body_deg * (float)M_PI / 180.0f);
+      float hdg = heading_deg_val * (float)M_PI / 180.0f;
+      atp4_eta_buf[i] = eta_amp * cosf(phase);
+      atp4_h_buf[i]   = vx_body * cosf(hdg) - vy_body * sinf(hdg);
+    }
+    for (uint32_t i = 0U; i < ATP4_N_BINS; i++) {
+      wfp_cross_bin_eta_h(atp4_eta_buf, atp4_h_buf, n, ATP4_K_MIN + i, &atp4_eta_north_bins[i]);
+    }
+
+    /* Build East channel */
+    for (uint32_t i = 0U; i < n; i++) {
+      float t = (float)i / fs;
+      float phase = 2.0f * (float)M_PI * f0 * t;
+      float vx_body = h_amp * sinf(phase) * cosf(known_from_body_deg * (float)M_PI / 180.0f);
+      float vy_body = h_amp * sinf(phase) * sinf(known_from_body_deg * (float)M_PI / 180.0f);
+      float hdg = heading_deg_val * (float)M_PI / 180.0f;
+      atp4_h_buf[i] = vx_body * sinf(hdg) + vy_body * cosf(hdg);
+    }
+    for (uint32_t i = 0U; i < ATP4_N_BINS; i++) {
+      wfp_cross_bin_eta_h(atp4_eta_buf, atp4_h_buf, n, ATP4_K_MIN + i, &atp4_eta_east_bins[i]);
+    }
+
+    /* Band-integrated direction over 0.08-0.40 Hz */
+    double p_eta_max = 0.0;
+    uint32_t peak_i = 0U;
+    for (uint32_t i = 0U; i < ATP4_N_BINS; i++) {
+      if (atp4_eta_north_bins[i].p_eta > p_eta_max) {
+        p_eta_max = atp4_eta_north_bins[i].p_eta;
+        peak_i = i;
+      }
+    }
+    double energy_thresh = 0.01 * p_eta_max;
+
+    double trap_num_c1 = 0.0, trap_num_c2 = 0.0, trap_den = 0.0;
+    double coh_sum = 0.0;
+    uint32_t valid_bins = 0U;
+    uint8_t have_prev = 0U;
+    double prev_f = 0.0, prev_w = 0.0, prev_wc1 = 0.0, prev_wc2 = 0.0;
+    double peak_from_deg = 0.0, peak_r1 = 0.0;
+
+    for (uint32_t i = 0U; i < ATP4_N_BINS; i++) {
+      double p_eta = atp4_eta_north_bins[i].p_eta;
+      double p_n   = atp4_eta_north_bins[i].p_h;
+      double p_e   = atp4_eta_east_bins[i].p_h;
+      double q_n   = atp4_eta_north_bins[i].cross_im;
+      double q_e   = atp4_eta_east_bins[i].cross_im;
+      double den   = sqrt(p_eta * (p_n + p_e));
+      double comp1 = 0.0, comp2 = 0.0;
+      if (den > 0.0) { comp1 = -q_n / den; comp2 = -q_e / den; }
+      double r1 = sqrt(comp1*comp1 + comp2*comp2);
+      if (r1 > 0.999) r1 = 0.999;
+
+      double theta_toward = atan2(comp2, comp1) * 180.0 / M_PI;
+      while (theta_toward < 0.0) theta_toward += 360.0;
+      while (theta_toward >= 360.0) theta_toward -= 360.0;
+      double theta_from = theta_toward + 180.0;
+      if (theta_from >= 360.0) theta_from -= 360.0;
+
+      double coh_den = p_eta * (p_n + p_e);
+      double vcoh = 0.0;
+      if (coh_den > 0.0) {
+        double cn2 = atp4_eta_north_bins[i].cross_re*atp4_eta_north_bins[i].cross_re +
+                     atp4_eta_north_bins[i].cross_im*atp4_eta_north_bins[i].cross_im;
+        double ce2 = atp4_eta_east_bins[i].cross_re*atp4_eta_east_bins[i].cross_re +
+                     atp4_eta_east_bins[i].cross_im*atp4_eta_east_bins[i].cross_im;
+        vcoh = (cn2 + ce2) / coh_den;
+      }
+      if (vcoh > 1.0) vcoh = 1.0;
+
+      if (i == peak_i) { peak_from_deg = theta_from; peak_r1 = r1; }
+
+      uint8_t valid = (p_eta >= energy_thresh) && isfinite(comp1) && isfinite(comp2);
+      if (valid) {
+        double f = (double)(ATP4_K_MIN + i) * (double)WFP_DF_HZ;
+        double cw = vcoh < 0.01 ? 0.01 : vcoh;
+        double w = p_eta * cw;
+        double wc1 = w * comp1, wc2 = w * comp2;
+        if (have_prev) {
+          double df = f - prev_f;
+          trap_num_c1 += 0.5 * df * (prev_wc1 + wc1);
+          trap_num_c2 += 0.5 * df * (prev_wc2 + wc2);
+          trap_den    += 0.5 * df * (prev_w   + w);
+        }
+        prev_f = f; prev_w = w; prev_wc1 = wc1; prev_wc2 = wc2;
+        have_prev = 1U;
+        coh_sum += vcoh;
+        valid_bins++;
+      }
+    }
+
+    double c1_band = 0.0, c2_band = 0.0;
+    if (trap_den > 0.0) { c1_band = trap_num_c1 / trap_den; c2_band = trap_num_c2 / trap_den; }
+    double from_band = atan2(c2_band, c1_band) * 180.0 / M_PI + 180.0;
+    while (from_band < 0.0) from_band += 360.0;
+    while (from_band >= 360.0) from_band -= 360.0;
+    double r1_band = sqrt(c1_band*c1_band + c2_band*c2_band);
+    double mean_coh = (valid_bins > 0U) ? coh_sum / (double)valid_bins : 0.0;
+
+    double err_deg = from_band - (double)known_from_geo_deg;
+    while (err_deg > 180.0) err_deg -= 360.0;
+    while (err_deg < -180.0) err_deg += 360.0;
+
+    snprintf(buf, sizeof(buf),
+             "\r\nATP4B result:\r\n"
+             "  mean coming-from = %.6f deg\r\n"
+             "  peak coming-from = %.6f deg\r\n"
+             "  known reference  = %.6f deg\r\n"
+             "  mean error       = %.6f deg\r\n"
+             "  r1 band          = %.6f\r\n"
+             "  r1 peak          = %.6f\r\n"
+             "  mean coherence   = %.6f\r\n"
+             "  valid bins       = %lu\r\n",
+             from_band, peak_from_deg,
+             (double)known_from_geo_deg, err_deg,
+             r1_band, peak_r1, mean_coh,
+             (unsigned long)valid_bins);
+    uart_print(buf);
+
+    uart_print("ATP4B COMPLETE.\r\n");
+  }
 #endif
   /* USER CODE END 2 */
 
