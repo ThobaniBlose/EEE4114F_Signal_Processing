@@ -19,6 +19,8 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "fatfs.h"
+
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "wave_mode.h"
@@ -65,8 +67,6 @@ SAI_HandleTypeDef hsai_BlockB1;
 SAI_HandleTypeDef hsai_BlockA1;
 SAI_HandleTypeDef hsai_BlockA2;
 
-SD_HandleTypeDef hsd1;
-
 SPI_HandleTypeDef hspi1;
 SPI_HandleTypeDef hspi3;
 
@@ -93,7 +93,6 @@ static void MX_USART2_UART_Init(void);
 static void MX_USART3_UART_Init(void);
 static void MX_SAI1_Init(void);
 static void MX_SAI2_Init(void);
-static void MX_SDMMC1_SD_Init(void);
 static void MX_SPI1_Init(void);
 static void MX_SPI3_Init(void);
 static void MX_TIM1_Init(void);
@@ -111,6 +110,58 @@ static void MX_USB_OTG_FS_USB_Init(void);
 static void uart_print(const char *s)
 {
     HAL_UART_Transmit(&hlpuart1, (uint8_t*)s, strlen(s), HAL_MAX_DELAY);
+}
+
+/* --- SD Card SPI CMD0 test functions --- */
+static uint8_t sd_spi_txrx(uint8_t tx) {
+    uint8_t rx = 0xFF;
+    HAL_SPI_TransmitReceive(&hspi1, &tx, &rx, 1, HAL_MAX_DELAY);
+    return rx;
+}
+
+static void sd_cs_high(void) {
+    HAL_GPIO_WritePin(SD_CS_GPIO_Port, SD_CS_Pin, GPIO_PIN_SET);
+}
+
+static void sd_cs_low(void) {
+    HAL_GPIO_WritePin(SD_CS_GPIO_Port, SD_CS_Pin, GPIO_PIN_RESET);
+}
+
+static void sd_dummy_clocks(uint16_t nbytes) {
+    for (uint16_t i = 0; i < nbytes; i++) {
+        sd_spi_txrx(0xFF);
+    }
+}
+
+static uint8_t sd_send_cmd0(void) {
+    uint8_t r1 = 0xFF;
+
+    sd_cs_high();
+    HAL_Delay(10);
+
+    /* At least 74 clock pulses with CS high */
+    sd_dummy_clocks(10);
+
+    sd_cs_low();
+    HAL_Delay(1);
+
+    /* CMD0: GO_IDLE_STATE */
+    sd_spi_txrx(0x40);
+    sd_spi_txrx(0x00);
+    sd_spi_txrx(0x00);
+    sd_spi_txrx(0x00);
+    sd_spi_txrx(0x00);
+    sd_spi_txrx(0x95);
+
+    for (uint8_t i = 0; i < 10; i++) {
+        r1 = sd_spi_txrx(0xFF);
+        if (r1 != 0xFF) break;
+    }
+
+    sd_cs_high();
+    sd_spi_txrx(0xFF);
+
+    return r1;
 }
 
 static void test_full_pipeline_mean_removal(void)
@@ -687,393 +738,69 @@ int main(void)
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
 
   /* USER CODE END Init */
 
+  /* Configure the system clock */
   SystemClock_Config();
+
+  /* Configure the peripherals common clocks */
   PeriphCommonClock_Config();
 
   /* USER CODE BEGIN SysInit */
 
   /* USER CODE END SysInit */
 
+  /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_ADC1_Init();
+  MX_CAN1_Init();
+  MX_COMP1_Init();
+  MX_I2C1_Init();
+  MX_I2C2_SMBUS_Init();
   MX_LPUART1_UART_Init();
-  // MX_ADC1_Init();
-  // MX_CAN1_Init();
-  // MX_COMP1_Init();
-  // MX_I2C1_Init();
-  // MX_I2C2_SMBUS_Init();
-  // MX_USART2_UART_Init();
-  // MX_USART3_UART_Init();
-  // MX_SAI1_Init();
-  // MX_SAI2_Init();
-  // MX_SDMMC1_SD_Init();
-  // MX_SPI1_Init();
-  // MX_SPI3_Init();
-  // MX_TIM1_Init();
-  // MX_TIM2_Init();
-  // MX_TIM3_Init();
-  // MX_TIM4_Init();
-  // MX_TIM15_Init();
-  // MX_USB_OTG_FS_USB_Init();
-
+  MX_USART2_UART_Init();
+  MX_USART3_UART_Init();
+  MX_SAI1_Init();
+  MX_SAI2_Init();
+  MX_SPI1_Init();
+  MX_SPI3_Init();
+  MX_TIM1_Init();
+  MX_TIM2_Init();
+  MX_TIM3_Init();
+  MX_TIM4_Init();
+  MX_TIM15_Init();
+  MX_USB_OTG_FS_USB_Init();
+  MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
   char buf[256];
 
-  /* Set to 1 to run the full step-by-step validation suite.
-   * Set to 0 for production single-pass processing. */
-  #define SHARC_RUN_VALIDATION  0
-
-#if SHARC_RUN_VALIDATION
-  /* --- Full validation suite (Steps 4-12C) lives here --- */
-  /* Enable this only when you need to re-prove the build. */
-  uart_print("VALIDATION MODE: Enable SHARC_RUN_VALIDATION=1 to run.\r\n");
-#else
-  /* --- Production single-pass processor --- */
   uart_print("\r\n============================================================\r\n");
-  uart_print("SHARC SINGLE-PASS WINDOW PROCESSOR\r\n");
+  uart_print("SD CARD SPI CMD0 TEST\r\n");
   uart_print("============================================================\r\n");
 
-  SharcResult_t sharc_result;
-  int sharc_status = sharc_process_window(
-      s001_ax_g, s001_ay_g, s001_az_g,
-      s001_mx_uT, s001_my_uT, s001_mz_uT,
-      s001_heading_deg, s001_roll_deg, s001_pitch_deg,
-      S001_REPLAY_N_SAMPLES,
-      &sharc_result);
+  HAL_Delay(500);
 
-  if (sharc_status != 0) {
-    snprintf(buf, sizeof(buf), "SHARC process error: %d\r\n", sharc_status);
-    uart_print(buf);
-    Error_Handler();
-  }
+  uint8_t r1 = sd_send_cmd0();
 
-  snprintf(buf, sizeof(buf),
-           "Mode: %s\r\n\r\n"
-           "Non-directional:\r\n"
-           "  Hm0  = %.6f m\r\n"
-           "  Tp   = %.6f s\r\n"
-           "  Tm01 = %.6f s\r\n"
-           "  Tm02 = %.6f s\r\n",
-           wave_mode_label(sharc_result.mode),
-           (double)sharc_result.Hm0, (double)sharc_result.Tp,
-           (double)sharc_result.Tm01, (double)sharc_result.Tm02);
+  snprintf(buf, sizeof(buf), "CMD0 response = 0x%02X\r\n", r1);
   uart_print(buf);
 
-  snprintf(buf, sizeof(buf),
-           "\r\nDirectional:\r\n"
-           "  mean from  = %.3f deg\r\n"
-           "  peak from  = %.3f deg\r\n"
-           "  r1 band    = %.4f\r\n"
-           "  r1 peak    = %.4f\r\n"
-           "  mean coh   = %.4f\r\n"
-           "  confident  = %lu\r\n"
-           "  valid bins = %lu\r\n",
-           (double)sharc_result.mean_from_deg,
-           (double)sharc_result.peak_from_deg,
-           (double)sharc_result.r1_band,
-           (double)sharc_result.r1_peak,
-           (double)sharc_result.mean_vector_coh,
-           (unsigned long)sharc_result.direction_confident,
-           (unsigned long)sharc_result.valid_bins);
-  uart_print(buf);
-
-  /* Format Tier-1 packet */
-  WavePacket_t final_pkt = {
-      .gps_fix = 0U, .lat = NAN, .lon = NAN,
-      .Hm0  = sharc_result.Hm0,
-      .Tp   = sharc_result.Tp,
-      .Tm01 = sharc_result.Tm01,
-      .Tm02 = sharc_result.Tm02,
-      .dir_deg = sharc_result.mean_from_deg,
-      .mode = sharc_result.mode,
-      .quality = (WaveQuality_t)sharc_result.direction_confident,
-      .r1  = sharc_result.r1_band,
-      .coh = sharc_result.mean_vector_coh,
-  };
-  strncpy(final_pkt.session_id, "S001", sizeof(final_pkt.session_id));
-
-  char pkt_out[WAVE_PACKET_MAX_LEN];
-  wave_packet_format(&final_pkt, pkt_out, sizeof(pkt_out));
-  uart_print("\r\nTier-1 packet:\r\n");
-  uart_print(pkt_out);
-  uart_print("\r\n");
-
-  uart_print("\r\nPROCESSING COMPLETE.\r\n");
-
-  /* =======================================================================
-   * ATP3: BODY-FRAME TO NORTH/EAST ROTATION TEST
-   * Uses direction_processor_rotate_horizontal() — the same function
-   * that the geographic directional branch uses.
-   * ======================================================================= */
-  uart_print("\r\n============================================================\r\n");
-  uart_print("ATP3: BODY-FRAME TO NORTH/EAST ROTATION TEST\r\n");
-  uart_print("============================================================\r\n");
-
-  {
-    #define ATP3_N  5U
-    float atp3_ax[ATP3_N]  = {1.0f, 1.0f, 1.0f, 0.0f, 0.0f};
-    float atp3_ay[ATP3_N]  = {0.0f, 0.0f, 0.0f, 1.0f, 1.0f};
-    float atp3_hdg[ATP3_N] = {0.0f, 45.0f, 90.0f, 0.0f, 90.0f};
-    float atp3_north[ATP3_N];
-    float atp3_east[ATP3_N];
-
-    DirectionProcessor_Result atp3_dir;
-    direction_processor_rotate_horizontal(
-        atp3_ax, atp3_ay, atp3_hdg,
-        atp3_north, atp3_east,
-        ATP3_N, &atp3_dir);
-
-    for (uint32_t i = 0; i < ATP3_N; i++) {
-      snprintf(buf, sizeof(buf),
-               "  Case %lu: ax=%.1f ay=%.1f hdg=%.1f -> N=%.6f E=%.6f\r\n",
-               (unsigned long)(i + 1U),
-               (double)atp3_ax[i], (double)atp3_ay[i], (double)atp3_hdg[i],
-               (double)atp3_north[i], (double)atp3_east[i]);
-      uart_print(buf);
-    }
-    uart_print("ATP3 COMPLETE.\r\n");
+  if (r1 == 0x01) {
+    uart_print("PASS: SD card responded to CMD0. SPI wiring and CS are working.\r\n");
+  } else if (r1 == 0xFF) {
+    uart_print("FAIL: No response from SD card. Check power, GND, MISO/MOSI/SCK/CS wiring.\r\n");
+  } else {
+    snprintf(buf, sizeof(buf), "CHECK: SD card responded with 0x%02X (expected 0x01).\r\n", r1);
+    uart_print(buf);
   }
 
-  /* =======================================================================
-   * ATP4A: SYNTHETIC HEADING-REFERENCED PEAK DIRECTION TEST
-   * ======================================================================= */
-  {
-    const uint32_t n = S001_REPLAY_N_SAMPLES;
-    const float fs = WFP_FS_HZ;
-    const uint32_t k_peak = 20U;
-    const float f0 = (float)k_peak * WFP_DF_HZ;
-    const float known_from_geo_deg = 60.0f;
-    const float heading_deg_val = 30.0f;
-    const float known_from_body_deg = known_from_geo_deg - heading_deg_val;
-    const float eta_amp = 0.50f;
-    const float h_amp   = 0.15f;
-
-    WfpCrossBin_t eta_north, eta_east;
-    WfpDirectionPeak_t dir_peak;
-
-    uart_print("\r\n============================================================\r\n");
-    uart_print("ATP4A: SYNTHETIC HEADING-REFERENCED PEAK DIRECTION TEST\r\n");
-    uart_print("============================================================\r\n");
-
-    snprintf(buf, sizeof(buf),
-             "Synthetic case:\r\n"
-             "  known geo coming-from = %.1f deg\r\n"
-             "  heading               = %.1f deg\r\n"
-             "  expected body-rel     = %.1f deg\r\n"
-             "  k_peak = %lu  f0 = %.6f Hz\r\n",
-             (double)known_from_geo_deg, (double)heading_deg_val,
-             (double)known_from_body_deg,
-             (unsigned long)k_peak, (double)f0);
-    uart_print(buf);
-
-    /* Build eta + North channel */
-    for (uint32_t i = 0U; i < n; i++) {
-      float t = (float)i / fs;
-      float phase = 2.0f * (float)M_PI * f0 * t;
-      float vx_body = h_amp * sinf(phase) * cosf(known_from_body_deg * (float)M_PI / 180.0f);
-      float vy_body = h_amp * sinf(phase) * sinf(known_from_body_deg * (float)M_PI / 180.0f);
-      float hdg = heading_deg_val * (float)M_PI / 180.0f;
-      wfp_eta_buf[i] = eta_amp * cosf(phase);
-      wfp_buf[i] = vx_body * cosf(hdg) - vy_body * sinf(hdg);
-    }
-    wfp_cross_bin_eta_h(wfp_eta_buf, wfp_buf, n, k_peak, &eta_north);
-
-    /* Build East channel */
-    for (uint32_t i = 0U; i < n; i++) {
-      float t = (float)i / fs;
-      float phase = 2.0f * (float)M_PI * f0 * t;
-      float vx_body = h_amp * sinf(phase) * cosf(known_from_body_deg * (float)M_PI / 180.0f);
-      float vy_body = h_amp * sinf(phase) * sinf(known_from_body_deg * (float)M_PI / 180.0f);
-      float hdg = heading_deg_val * (float)M_PI / 180.0f;
-      wfp_buf[i] = vx_body * sinf(hdg) + vy_body * cosf(hdg);
-    }
-    wfp_cross_bin_eta_h(wfp_eta_buf, wfp_buf, n, k_peak, &eta_east);
-
-    wfp_direction_peak_from_cross(&eta_north, &eta_east, &dir_peak);
-
-    float err_deg = dir_peak.peak_from_deg - known_from_geo_deg;
-    while (err_deg > 180.0f)  err_deg -= 360.0f;
-    while (err_deg < -180.0f) err_deg += 360.0f;
-
-    snprintf(buf, sizeof(buf),
-             "\r\nATP4A result:\r\n"
-             "  estimated coming-from = %.6f deg\r\n"
-             "  known reference       = %.6f deg\r\n"
-             "  error                 = %.6f deg\r\n"
-             "  r1 peak               = %.6f\r\n"
-             "  vector coherence      = %.6f\r\n",
-             (double)dir_peak.peak_from_deg,
-             (double)known_from_geo_deg,
-             (double)err_deg,
-             (double)dir_peak.r1_peak,
-             (double)dir_peak.vector_coh_peak);
-    uart_print(buf);
-
-    uart_print("ATP4A COMPLETE.\r\n");
-  }
-
-  /* =======================================================================
-   * ATP4B: SYNTHETIC HEADING-REFERENCED BAND-INTEGRATED DIRECTION TEST
-   * Tests geographic directional branch over trusted 0.08-0.40 Hz band.
-   * ======================================================================= */
-  {
-    const uint32_t n = WFP_WELCH_WIN_LEN;  /* 8192 samples */
-    const float fs = WFP_FS_HZ;
-    const uint32_t k_peak = 20U;
-    const float f0 = (float)k_peak * WFP_DF_HZ;
-    const float known_from_geo_deg = 60.0f;
-    const float heading_deg_val = 30.0f;
-    const float known_from_body_deg = known_from_geo_deg - heading_deg_val;
-    const float eta_amp = 0.50f;
-    const float h_amp   = 0.15f;
-
-    uart_print("\r\n============================================================\r\n");
-    uart_print("ATP4B: SYNTHETIC HEADING-REFERENCED BAND DIRECTION TEST\r\n");
-    uart_print("============================================================\r\n");
-
-    snprintf(buf, sizeof(buf),
-             "Synthetic case:\r\n"
-             "  known geo coming-from = %.1f deg\r\n"
-             "  heading               = %.1f deg\r\n"
-             "  trusted band          = 0.08 to 0.40 Hz\r\n"
-             "  k range               = %lu to %lu\r\n"
-             "  k_peak = %lu  f0 = %.6f Hz\r\n",
-             (double)known_from_geo_deg, (double)heading_deg_val,
-             (unsigned long)ATP4_K_MIN, (unsigned long)ATP4_K_MAX,
-             (unsigned long)k_peak, (double)f0);
-    uart_print(buf);
-
-    /* Build eta + North channel */
-    for (uint32_t i = 0U; i < n; i++) {
-      float t = (float)i / fs;
-      float phase = 2.0f * (float)M_PI * f0 * t;
-      float vx_body = h_amp * sinf(phase) * cosf(known_from_body_deg * (float)M_PI / 180.0f);
-      float vy_body = h_amp * sinf(phase) * sinf(known_from_body_deg * (float)M_PI / 180.0f);
-      float hdg = heading_deg_val * (float)M_PI / 180.0f;
-      atp4_eta_buf[i] = eta_amp * cosf(phase);
-      atp4_h_buf[i]   = vx_body * cosf(hdg) - vy_body * sinf(hdg);
-    }
-    for (uint32_t i = 0U; i < ATP4_N_BINS; i++) {
-      wfp_cross_bin_eta_h(atp4_eta_buf, atp4_h_buf, n, ATP4_K_MIN + i, &atp4_eta_north_bins[i]);
-    }
-
-    /* Build East channel */
-    for (uint32_t i = 0U; i < n; i++) {
-      float t = (float)i / fs;
-      float phase = 2.0f * (float)M_PI * f0 * t;
-      float vx_body = h_amp * sinf(phase) * cosf(known_from_body_deg * (float)M_PI / 180.0f);
-      float vy_body = h_amp * sinf(phase) * sinf(known_from_body_deg * (float)M_PI / 180.0f);
-      float hdg = heading_deg_val * (float)M_PI / 180.0f;
-      atp4_h_buf[i] = vx_body * sinf(hdg) + vy_body * cosf(hdg);
-    }
-    for (uint32_t i = 0U; i < ATP4_N_BINS; i++) {
-      wfp_cross_bin_eta_h(atp4_eta_buf, atp4_h_buf, n, ATP4_K_MIN + i, &atp4_eta_east_bins[i]);
-    }
-
-    /* Band-integrated direction over 0.08-0.40 Hz */
-    double p_eta_max = 0.0;
-    uint32_t peak_i = 0U;
-    for (uint32_t i = 0U; i < ATP4_N_BINS; i++) {
-      if (atp4_eta_north_bins[i].p_eta > p_eta_max) {
-        p_eta_max = atp4_eta_north_bins[i].p_eta;
-        peak_i = i;
-      }
-    }
-    double energy_thresh = 0.01 * p_eta_max;
-
-    double trap_num_c1 = 0.0, trap_num_c2 = 0.0, trap_den = 0.0;
-    double coh_sum = 0.0;
-    uint32_t valid_bins = 0U;
-    uint8_t have_prev = 0U;
-    double prev_f = 0.0, prev_w = 0.0, prev_wc1 = 0.0, prev_wc2 = 0.0;
-    double peak_from_deg = 0.0, peak_r1 = 0.0;
-
-    for (uint32_t i = 0U; i < ATP4_N_BINS; i++) {
-      double p_eta = atp4_eta_north_bins[i].p_eta;
-      double p_n   = atp4_eta_north_bins[i].p_h;
-      double p_e   = atp4_eta_east_bins[i].p_h;
-      double q_n   = atp4_eta_north_bins[i].cross_im;
-      double q_e   = atp4_eta_east_bins[i].cross_im;
-      double den   = sqrt(p_eta * (p_n + p_e));
-      double comp1 = 0.0, comp2 = 0.0;
-      if (den > 0.0) { comp1 = -q_n / den; comp2 = -q_e / den; }
-      double r1 = sqrt(comp1*comp1 + comp2*comp2);
-      if (r1 > 0.999) r1 = 0.999;
-
-      double theta_toward = atan2(comp2, comp1) * 180.0 / M_PI;
-      while (theta_toward < 0.0) theta_toward += 360.0;
-      while (theta_toward >= 360.0) theta_toward -= 360.0;
-      double theta_from = theta_toward + 180.0;
-      if (theta_from >= 360.0) theta_from -= 360.0;
-
-      double coh_den = p_eta * (p_n + p_e);
-      double vcoh = 0.0;
-      if (coh_den > 0.0) {
-        double cn2 = atp4_eta_north_bins[i].cross_re*atp4_eta_north_bins[i].cross_re +
-                     atp4_eta_north_bins[i].cross_im*atp4_eta_north_bins[i].cross_im;
-        double ce2 = atp4_eta_east_bins[i].cross_re*atp4_eta_east_bins[i].cross_re +
-                     atp4_eta_east_bins[i].cross_im*atp4_eta_east_bins[i].cross_im;
-        vcoh = (cn2 + ce2) / coh_den;
-      }
-      if (vcoh > 1.0) vcoh = 1.0;
-
-      if (i == peak_i) { peak_from_deg = theta_from; peak_r1 = r1; }
-
-      uint8_t valid = (p_eta >= energy_thresh) && isfinite(comp1) && isfinite(comp2);
-      if (valid) {
-        double f = (double)(ATP4_K_MIN + i) * (double)WFP_DF_HZ;
-        double cw = vcoh < 0.01 ? 0.01 : vcoh;
-        double w = p_eta * cw;
-        double wc1 = w * comp1, wc2 = w * comp2;
-        if (have_prev) {
-          double df = f - prev_f;
-          trap_num_c1 += 0.5 * df * (prev_wc1 + wc1);
-          trap_num_c2 += 0.5 * df * (prev_wc2 + wc2);
-          trap_den    += 0.5 * df * (prev_w   + w);
-        }
-        prev_f = f; prev_w = w; prev_wc1 = wc1; prev_wc2 = wc2;
-        have_prev = 1U;
-        coh_sum += vcoh;
-        valid_bins++;
-      }
-    }
-
-    double c1_band = 0.0, c2_band = 0.0;
-    if (trap_den > 0.0) { c1_band = trap_num_c1 / trap_den; c2_band = trap_num_c2 / trap_den; }
-    double from_band = atan2(c2_band, c1_band) * 180.0 / M_PI + 180.0;
-    while (from_band < 0.0) from_band += 360.0;
-    while (from_band >= 360.0) from_band -= 360.0;
-    double r1_band = sqrt(c1_band*c1_band + c2_band*c2_band);
-    double mean_coh = (valid_bins > 0U) ? coh_sum / (double)valid_bins : 0.0;
-
-    double err_deg = from_band - (double)known_from_geo_deg;
-    while (err_deg > 180.0) err_deg -= 360.0;
-    while (err_deg < -180.0) err_deg += 360.0;
-
-    snprintf(buf, sizeof(buf),
-             "\r\nATP4B result:\r\n"
-             "  mean coming-from = %.6f deg\r\n"
-             "  peak coming-from = %.6f deg\r\n"
-             "  known reference  = %.6f deg\r\n"
-             "  mean error       = %.6f deg\r\n"
-             "  r1 band          = %.6f\r\n"
-             "  r1 peak          = %.6f\r\n"
-             "  mean coherence   = %.6f\r\n"
-             "  valid bins       = %lu\r\n",
-             from_band, peak_from_deg,
-             (double)known_from_geo_deg, err_deg,
-             r1_band, peak_r1, mean_coh,
-             (unsigned long)valid_bins);
-    uart_print(buf);
-
-    uart_print("ATP4B COMPLETE.\r\n");
-  }
-#endif
+  uart_print("SD CMD0 TEST COMPLETE.\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
@@ -1667,38 +1394,6 @@ static void MX_SAI2_Init(void)
 }
 
 /**
-  * @brief SDMMC1 Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_SDMMC1_SD_Init(void)
-{
-
-  /* USER CODE BEGIN SDMMC1_Init 0 */
-
-  /* USER CODE END SDMMC1_Init 0 */
-
-  /* USER CODE BEGIN SDMMC1_Init 1 */
-
-  /* USER CODE END SDMMC1_Init 1 */
-  hsd1.Instance = SDMMC1;
-  hsd1.Init.ClockEdge = SDMMC_CLOCK_EDGE_RISING;
-  hsd1.Init.ClockPowerSave = SDMMC_CLOCK_POWER_SAVE_DISABLE;
-  hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B;
-  hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
-  hsd1.Init.ClockDiv = 0;
-  hsd1.Init.Transceiver = SDMMC_TRANSCEIVER_DISABLE;
-  if (HAL_SD_Init(&hsd1) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN SDMMC1_Init 2 */
-
-  /* USER CODE END SDMMC1_Init 2 */
-
-}
-
-/**
   * @brief SPI1 Initialization Function
   * @param None
   * @retval None
@@ -1717,17 +1412,17 @@ static void MX_SPI1_Init(void)
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_MASTER;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-  hspi1.Init.DataSize = SPI_DATASIZE_4BIT;
+  hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
-  hspi1.Init.NSS = SPI_NSS_HARD_OUTPUT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi1.Init.NSS = SPI_NSS_SOFT;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_256;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
   hspi1.Init.CRCPolynomial = 7;
   hspi1.Init.CRCLength = SPI_CRC_LENGTH_DATASIZE;
-  hspi1.Init.NSSPMode = SPI_NSS_PULSE_ENABLE;
+  hspi1.Init.NSSPMode = SPI_NSS_PULSE_DISABLE;
   if (HAL_SPI_Init(&hspi1) != HAL_OK)
   {
     Error_Handler();
@@ -2012,10 +1707,6 @@ static void MX_TIM4_Init(void)
   sConfigOC.Pulse = 0;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
-  if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_3) != HAL_OK)
-  {
-    Error_Handler();
-  }
   if (HAL_TIM_PWM_ConfigChannel(&htim4, &sConfigOC, TIM_CHANNEL_4) != HAL_OK)
   {
     Error_Handler();
@@ -2137,7 +1828,17 @@ static void MX_GPIO_Init(void)
   HAL_PWREx_EnableVddIO2();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(SD_CS_GPIO_Port, SD_CS_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOB, GPIO_PIN_7, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : SD_CS_Pin */
+  GPIO_InitStruct.Pin = SD_CS_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_MEDIUM;
+  HAL_GPIO_Init(SD_CS_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PA8 PA10 PA11 PA12 */
   GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12;
