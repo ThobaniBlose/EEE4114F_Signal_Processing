@@ -75,4 +75,4 @@ Open the project in STM32CubeIDE and build the Debug configuration. Only GPIO an
 
 ## Author
 
-Thobani Blose, EEE4114F Signal Processing Subsystem, University of Cape Town, 2026.
+Thobani Blose, EEE4113F Signal Processing Subsystem, University of Cape Town, 2026.
