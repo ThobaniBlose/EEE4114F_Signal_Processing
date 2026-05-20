@@ -149,6 +149,44 @@ static uint8_t sd_send_cmd(uint8_t cmd, uint32_t arg, uint8_t crc) {
     return 0xFF;
 }
 
+uint8_t sd_init(void) {
+    uint8_t r1;
+    uint8_t r7[4];
+
+    sd_send_dummy_clocks();
+
+    r1 = sd_send_cmd(0, 0x00000000, 0x95);
+    sd_cs_high();
+    if (r1 != 0x01) return 1;
+
+    r1 = sd_send_cmd(8, 0x000001AA, 0x87);
+    r7[0] = sd_spi_txrx(0xFF);
+    r7[1] = sd_spi_txrx(0xFF);
+    r7[2] = sd_spi_txrx(0xFF);
+    r7[3] = sd_spi_txrx(0xFF);
+    sd_cs_high();
+    if (r1 != 0x01 || r7[2] != 0x01 || r7[3] != 0xAA) return 2;
+
+    uint32_t timeout = 0;
+    do {
+        r1 = sd_send_cmd(55, 0x00000000, 0xFF);
+        sd_cs_high();
+        r1 = sd_send_cmd(41, 0x40000000, 0xFF);
+        sd_cs_high();
+        timeout++;
+        HAL_Delay(10);
+    } while ((r1 != 0x00) && (timeout < 500));
+    if (r1 != 0x00) return 3;
+
+    r1 = sd_send_cmd(58, 0x00000000, 0xFF);
+    sd_spi_txrx(0xFF); sd_spi_txrx(0xFF);
+    sd_spi_txrx(0xFF); sd_spi_txrx(0xFF);
+    sd_cs_high();
+    if (r1 != 0x00) return 4;
+
+    return 0;
+}
+
 static void sd_card_spi_full_init_test(void) {
     char buf[256];
     uint8_t r1;
@@ -230,6 +268,255 @@ static void sd_card_spi_full_init_test(void) {
     }
 
     uart_print("PASS: SD card fully initialised in SPI mode.\r\n");
+}
+
+uint8_t sd_read_block(uint32_t block_addr, uint8_t *buffer) {
+    uint8_t r1;
+    uint8_t token;
+
+    r1 = sd_send_cmd(17, block_addr, 0xFF);
+    if (r1 != 0x00) {
+        sd_cs_high();
+        return r1;
+    }
+
+    for (uint32_t i = 0; i < 100000; i++) {
+        token = sd_spi_txrx(0xFF);
+        if (token == 0xFE) break;
+    }
+
+    if (token != 0xFE) {
+        sd_cs_high();
+        return 0xFE;
+    }
+
+    for (uint32_t i = 0; i < 512; i++) {
+        buffer[i] = sd_spi_txrx(0xFF);
+    }
+
+    sd_spi_txrx(0xFF);
+    sd_spi_txrx(0xFF);
+    sd_cs_high();
+    return 0x00;
+}
+
+static void sd_card_spi_read_block0_test(void) {
+    char buf[256];
+    static uint8_t sector[512];
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("SD CARD SPI CMD17 READ BLOCK 0 TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    uart_print("About to call sd_read_block(0)...\r\n");
+    uint8_t status = sd_read_block(0, sector);
+    uart_print("Returned from sd_read_block().\r\n");
+
+    snprintf(buf, sizeof(buf), "CMD17/block read status = 0x%02X\r\n", status);
+    uart_print(buf);
+
+    if (status != 0x00) {
+        uart_print("FAIL: Could not read sector 0.\r\n");
+        return;
+    }
+
+    uart_print("First 16 bytes of sector 0:\r\n");
+    for (uint32_t i = 0; i < 16; i++) {
+        snprintf(buf, sizeof(buf), "%02X ", sector[i]);
+        uart_print(buf);
+    }
+    uart_print("\r\n");
+
+    snprintf(buf, sizeof(buf),
+             "Boot sector signature: 0x%02X 0x%02X\r\n",
+             sector[510], sector[511]);
+    uart_print(buf);
+
+    if (sector[510] == 0x55 && sector[511] == 0xAA) {
+        uart_print("PASS: Sector 0 read successfully, boot signature valid.\r\n");
+    } else {
+        uart_print("CHECK: Sector read worked but boot signature is not 55 AA.\r\n");
+        uart_print("Card may be unformatted or use a different partition layout.\r\n");
+    }
+}
+
+#define SD_TEST_SECTOR 8192U
+
+uint8_t sd_write_block(uint32_t block_addr, const uint8_t *data) {
+    uint8_t r1;
+    uint8_t resp;
+    uint8_t dummy;
+
+    r1 = sd_send_cmd(24, block_addr, 0xFF);
+    if (r1 != 0x00) return r1;
+
+    sd_spi_txrx(0xFF);
+    sd_spi_txrx(0xFE);
+
+    for (uint32_t i = 0; i < 512; i++) sd_spi_txrx(data[i]);
+
+    sd_spi_txrx(0xFF);
+    sd_spi_txrx(0xFF);
+
+    resp = sd_spi_txrx(0xFF);
+    if ((resp & 0x1F) != 0x05) return resp;
+
+    uint32_t timeout = 1000000;
+    do {
+        dummy = sd_spi_txrx(0xFF);
+        timeout--;
+    } while ((dummy != 0xFF) && (timeout > 0));
+
+    sd_cs_high();
+    return (timeout == 0) ? 0xFE : 0x00;
+}
+
+static void sd_cmd24_write_readback_test(void) {
+    char buf[128];
+    static uint8_t tx_block[512];
+    static uint8_t rx_block[512];
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("SD CARD SPI CMD24 WRITE + READBACK TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    for (uint32_t i = 0; i < 512; i++) {
+        tx_block[i] = (uint8_t)(i & 0xFF);
+        rx_block[i] = 0x00;
+    }
+
+    uint8_t wr = sd_write_block(SD_TEST_SECTOR, tx_block);
+    snprintf(buf, sizeof(buf), "CMD24/write status = 0x%02X\r\n", wr);
+    uart_print(buf);
+
+    if (wr != 0x00) {
+        uart_print("FAIL: Could not write test sector.\r\n");
+        return;
+    }
+
+    uart_print("Write complete. Reading back...\r\n");
+
+    uint8_t rd = sd_read_block(SD_TEST_SECTOR, rx_block);
+    snprintf(buf, sizeof(buf), "CMD17/readback status = 0x%02X\r\n", rd);
+    uart_print(buf);
+
+    if (rd != 0x00) {
+        uart_print("FAIL: Could not read back test sector.\r\n");
+        return;
+    }
+
+    uint32_t errors = 0;
+    for (uint32_t i = 0; i < 512; i++) {
+        if (rx_block[i] != tx_block[i]) errors++;
+    }
+
+    snprintf(buf, sizeof(buf), "Readback compare errors = %lu\r\n", (unsigned long)errors);
+    uart_print(buf);
+
+    uart_print("First 16 bytes read back:\r\n");
+    for (uint32_t i = 0; i < 16; i++) {
+        snprintf(buf, sizeof(buf), "%02X ", rx_block[i]);
+        uart_print(buf);
+    }
+    uart_print("\r\n");
+
+    if (errors == 0) {
+        uart_print("PASS: CMD24 write and CMD17 readback match.\r\n");
+    } else {
+        uart_print("FAIL: Readback data does not match written pattern.\r\n");
+    }
+}
+
+static void test_fatfs_list_files(void) {
+    char buf[256];
+    FATFS fs;
+    DIR dir;
+    FILINFO fno;
+    FRESULT res;
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("FATFS ROOT DIRECTORY LIST TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    res = f_mount(&fs, "", 1);
+    snprintf(buf, sizeof(buf), "f_mount result = %d\r\n", res);
+    uart_print(buf);
+
+    if (res != FR_OK) {
+        uart_print("FAIL: Could not mount SD card filesystem.\r\n");
+        return;
+    }
+
+    res = f_opendir(&dir, "/");
+    snprintf(buf, sizeof(buf), "f_opendir result = %d\r\n", res);
+    uart_print(buf);
+
+    if (res != FR_OK) {
+        uart_print("FAIL: Could not open root directory.\r\n");
+        return;
+    }
+
+    uart_print("\r\nFiles found on SD card:\r\n");
+
+    while (1) {
+        res = f_readdir(&dir, &fno);
+        if (res != FR_OK || fno.fname[0] == 0) break;
+
+        snprintf(buf, sizeof(buf), "  %s  size=%lu bytes\r\n",
+                 fno.fname, (unsigned long)fno.fsize);
+        uart_print(buf);
+    }
+
+    f_closedir(&dir);
+    uart_print("\r\nFATFS ROOT DIRECTORY LIST TEST COMPLETE.\r\n");
+}
+
+static void sd_fatfs_mount_write_test(void) {
+    FATFS fs;
+    FIL file;
+    FRESULT fr;
+    UINT bw;
+    char buf[256];
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("SD CARD FATFS MOUNT + WRITE TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    fr = f_mount(&fs, "", 1);
+    snprintf(buf, sizeof(buf), "f_mount result = %d\r\n", fr);
+    uart_print(buf);
+
+    if (fr != FR_OK) {
+        uart_print("FAIL: FatFS mount failed.\r\n");
+        uart_print("The diskio layer may not be connected to the SPI SD driver yet.\r\n");
+        return;
+    }
+
+    fr = f_open(&file, "SHARC_TEST.TXT", FA_CREATE_ALWAYS | FA_WRITE);
+    snprintf(buf, sizeof(buf), "f_open result  = %d\r\n", fr);
+    uart_print(buf);
+
+    if (fr != FR_OK) {
+        uart_print("FAIL: Could not create SHARC_TEST.TXT.\r\n");
+        return;
+    }
+
+    const char *line =
+        "SHARC SD card write test successful.\r\n"
+        "This file was written by STM32 using SPI and FatFS.\r\n";
+
+    fr = f_write(&file, line, strlen(line), &bw);
+    snprintf(buf, sizeof(buf), "f_write result = %d, bytes written = %lu\r\n",
+             fr, (unsigned long)bw);
+    uart_print(buf);
+
+    f_close(&file);
+
+    if (fr == FR_OK && bw == strlen(line)) {
+        uart_print("PASS: File created and written successfully.\r\n");
+    } else {
+        uart_print("FAIL: File write did not complete correctly.\r\n");
+    }
 }
 
 static void test_full_pipeline_mean_removal(void)
@@ -826,29 +1113,33 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_ADC1_Init();
-  MX_CAN1_Init();
-  MX_COMP1_Init();
-  MX_I2C1_Init();
-  MX_I2C2_SMBUS_Init();
   MX_LPUART1_UART_Init();
-  MX_USART2_UART_Init();
-  MX_USART3_UART_Init();
-  MX_SAI1_Init();
-  MX_SAI2_Init();
   MX_SPI1_Init();
-  MX_SPI3_Init();
-  MX_TIM1_Init();
-  MX_TIM2_Init();
-  MX_TIM3_Init();
-  MX_TIM4_Init();
-  MX_TIM15_Init();
-  MX_USB_OTG_FS_USB_Init();
   MX_FATFS_Init();
+  // MX_ADC1_Init();
+  // MX_CAN1_Init();
+  // MX_COMP1_Init();
+  // MX_I2C1_Init();
+  // MX_I2C2_SMBUS_Init();
+  // MX_USART2_UART_Init();
+  // MX_USART3_UART_Init();
+  // MX_SAI1_Init();
+  // MX_SAI2_Init();
+  // MX_SPI3_Init();
+  // MX_TIM1_Init();
+  // MX_TIM2_Init();
+  // MX_TIM3_Init();
+  // MX_TIM4_Init();
+  // MX_TIM15_Init();
+  // MX_USB_OTG_FS_USB_Init();
   /* USER CODE BEGIN 2 */
   char buf[256];
 
-  sd_card_spi_full_init_test();
+  uart_print("\r\n\r\nUART + SPI1 INIT OK\r\n");
+
+  HAL_Delay(500);
+
+  test_fatfs_list_files();
 
   /* USER CODE END 2 */
 
@@ -856,8 +1147,9 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    uart_print("UART heartbeat\r\n");
     HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7);
-    HAL_Delay(500);
+    HAL_Delay(1000);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
