@@ -601,6 +601,185 @@ static void fatfs_parse_w0_first_line_test(void) {
     }
 }
 
+static int read_line_char_by_char(FIL *file, char *line, UINT max_len) {
+    UINT br = 0;
+    UINT idx = 0;
+    char ch;
+
+    if (line == NULL || max_len < 2U) return -1;
+
+    while (idx < (max_len - 1U)) {
+        FRESULT fr = f_read(file, &ch, 1, &br);
+        if (fr != FR_OK) return -2;
+        if (br == 0U) break;
+        if (ch == '\r') continue;
+        line[idx++] = ch;
+        if (ch == '\n') break;
+    }
+    line[idx] = '\0';
+    return (idx == 0U) ? 0 : 1;
+}
+
+static void fatfs_parse_w0_first_100_lines_test(void) {
+    char buf[256];
+    FATFS fs;
+    FIL file;
+    FRESULT fr;
+    char line[128];
+
+    int hh, mm, ss;
+    int ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
+
+    uint32_t valid_lines = 0U;
+    uint32_t bad_lines = 0U;
+    long long sum_ax = 0, sum_ay = 0, sum_az = 0;
+    long long sum_gx = 0, sum_gy = 0, sum_gz = 0;
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("FATFS PARSE W0.TXT FIRST 100 LINES TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    fr = f_mount(&fs, "", 1);
+    snprintf(buf, sizeof(buf), "f_mount result = %u\r\n", fr);
+    uart_print(buf);
+    if (fr != FR_OK) { uart_print("FAIL: Mount failed.\r\n"); return; }
+
+    fr = f_open(&file, "W0.TXT", FA_READ);
+    snprintf(buf, sizeof(buf), "f_open W0.TXT result = %u\r\n", fr);
+    uart_print(buf);
+    if (fr != FR_OK) { uart_print("FAIL: Could not open W0.TXT.\r\n"); return; }
+
+    uart_print("Reading and parsing first 100 lines...\r\n");
+
+    while (valid_lines < 100U) {
+        int ls = read_line_char_by_char(&file, line, sizeof(line));
+        if (ls <= 0) break;
+
+        int fields = sscanf(line, "%d:%d:%d, %d, %d, %d, %d, %d, %d",
+                            &hh, &mm, &ss,
+                            &ax_raw, &ay_raw, &az_raw,
+                            &gx_raw, &gy_raw, &gz_raw);
+        if (fields == 9) {
+            sum_ax += ax_raw; sum_ay += ay_raw; sum_az += az_raw;
+            sum_gx += gx_raw; sum_gy += gy_raw; sum_gz += gz_raw;
+            valid_lines++;
+        } else {
+            bad_lines++;
+        }
+    }
+
+    f_close(&file);
+
+    snprintf(buf, sizeof(buf),
+             "Valid lines = %lu, Bad lines = %lu\r\n",
+             (unsigned long)valid_lines, (unsigned long)bad_lines);
+    uart_print(buf);
+
+    if (valid_lines > 0U) {
+        snprintf(buf, sizeof(buf),
+                 "Raw means (first 100 lines):\r\n"
+                 "  ax=%.2f  ay=%.2f  az=%.2f\r\n"
+                 "  gx=%.2f  gy=%.2f  gz=%.2f\r\n",
+                 (double)((float)sum_ax / (float)valid_lines),
+                 (double)((float)sum_ay / (float)valid_lines),
+                 (double)((float)sum_az / (float)valid_lines),
+                 (double)((float)sum_gx / (float)valid_lines),
+                 (double)((float)sum_gy / (float)valid_lines),
+                 (double)((float)sum_gz / (float)valid_lines));
+        uart_print(buf);
+    }
+
+    if (valid_lines == 100U && bad_lines == 0U) {
+        uart_print("PASS: First 100 lines parsed successfully.\r\n");
+    } else {
+        uart_print("CHECK: Not all lines parsed cleanly.\r\n");
+    }
+}
+
+static void fatfs_parse_w0_first_100_lines_units_test(void) {
+    char buf[256];
+    FATFS fs;
+    FIL file;
+    FRESULT fr;
+    char line[128];
+
+    int hh, mm, ss;
+    int ax_raw, ay_raw, az_raw, gx_raw, gy_raw, gz_raw;
+
+    uint32_t valid_lines = 0U;
+    uint32_t bad_lines = 0U;
+
+    double sum_ax_g = 0.0, sum_ay_g = 0.0, sum_az_g = 0.0;
+    double sum_gx_dps = 0.0, sum_gy_dps = 0.0, sum_gz_dps = 0.0;
+
+    const float ACCEL_LSB_PER_G = 8192.0f;
+    const float GYRO_LSB_PER_DPS = 131.0f;
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("FATFS PARSE W0.TXT FIRST 100 LINES UNIT CONVERSION TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    fr = f_mount(&fs, "", 1);
+    snprintf(buf, sizeof(buf), "f_mount result = %u\r\n", fr);
+    uart_print(buf);
+    if (fr != FR_OK) { uart_print("FAIL: Mount failed.\r\n"); return; }
+
+    fr = f_open(&file, "W0.TXT", FA_READ);
+    snprintf(buf, sizeof(buf), "f_open W0.TXT result = %u\r\n", fr);
+    uart_print(buf);
+    if (fr != FR_OK) { uart_print("FAIL: Could not open W0.TXT.\r\n"); return; }
+
+    uart_print("Reading, parsing and converting first 100 lines...\r\n");
+
+    while (valid_lines < 100U) {
+        int ls = read_line_char_by_char(&file, line, sizeof(line));
+        if (ls <= 0) break;
+
+        int fields = sscanf(line, "%d:%d:%d, %d, %d, %d, %d, %d, %d",
+                            &hh, &mm, &ss,
+                            &ax_raw, &ay_raw, &az_raw,
+                            &gx_raw, &gy_raw, &gz_raw);
+        if (fields == 9) {
+            sum_ax_g += (float)ax_raw / ACCEL_LSB_PER_G;
+            sum_ay_g += (float)ay_raw / ACCEL_LSB_PER_G;
+            sum_az_g += (float)az_raw / ACCEL_LSB_PER_G;
+            sum_gx_dps += (float)gx_raw / GYRO_LSB_PER_DPS;
+            sum_gy_dps += (float)gy_raw / GYRO_LSB_PER_DPS;
+            sum_gz_dps += (float)gz_raw / GYRO_LSB_PER_DPS;
+            valid_lines++;
+        } else {
+            bad_lines++;
+        }
+    }
+
+    f_close(&file);
+
+    snprintf(buf, sizeof(buf), "Valid lines = %lu, Bad lines = %lu\r\n",
+             (unsigned long)valid_lines, (unsigned long)bad_lines);
+    uart_print(buf);
+
+    if (valid_lines > 0U) {
+        double inv_n = 1.0 / (double)valid_lines;
+        snprintf(buf, sizeof(buf),
+                 "Converted means (first 100 lines):\r\n"
+                 "  ax = %.6f g\r\n"
+                 "  ay = %.6f g\r\n"
+                 "  az = %.6f g\r\n"
+                 "  gx = %.6f deg/s\r\n"
+                 "  gy = %.6f deg/s\r\n"
+                 "  gz = %.6f deg/s\r\n",
+                 sum_ax_g * inv_n, sum_ay_g * inv_n, sum_az_g * inv_n,
+                 sum_gx_dps * inv_n, sum_gy_dps * inv_n, sum_gz_dps * inv_n);
+        uart_print(buf);
+    }
+
+    if (valid_lines == 100U && bad_lines == 0U) {
+        uart_print("PASS: Unit conversion test completed.\r\n");
+    } else {
+        uart_print("CHECK: Some lines not parsed cleanly.\r\n");
+    }
+}
+
 static void sd_fatfs_mount_write_test(void) {
     FATFS fs;
     FIL file;
@@ -1271,7 +1450,9 @@ int main(void)
 
   // test_fatfs_list_files();
   // test_fatfs_read_w0_small_preview();
-  fatfs_parse_w0_first_line_test();
+  // fatfs_parse_w0_first_line_test();
+  // fatfs_parse_w0_first_100_lines_test();
+  fatfs_parse_w0_first_100_lines_units_test();
 
   /* USER CODE END 2 */
 
