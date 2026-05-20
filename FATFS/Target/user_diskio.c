@@ -51,7 +51,7 @@ DSTATUS USER_initialize (BYTE pdrv)
 {
   /* USER CODE BEGIN INIT */
   (void)pdrv;
-  if ((Stat & STA_NOINIT) == 0U) return Stat;
+  if (Stat == 0) return Stat;
 
   HAL_Delay(200);
 

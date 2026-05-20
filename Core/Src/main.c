@@ -471,6 +471,136 @@ static void test_fatfs_list_files(void) {
     uart_print("\r\nFATFS ROOT DIRECTORY LIST TEST COMPLETE.\r\n");
 }
 
+static void test_fatfs_read_w0_small_preview(void) {
+    char buf[129];
+    FATFS fs;
+    FIL file;
+    FRESULT fres;
+    UINT br = 0;
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("FATFS READ W0.TXT SMALL PREVIEW TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    fres = f_mount(&fs, "", 1);
+    snprintf(buf, sizeof(buf), "f_mount result = %u\r\n", fres);
+    uart_print(buf);
+    if (fres != FR_OK) {
+        uart_print("FAIL: Mount failed.\r\n");
+        return;
+    }
+
+    fres = f_open(&file, "W0.TXT", FA_READ);
+    snprintf(buf, sizeof(buf), "f_open W0.TXT result = %u\r\n", fres);
+    uart_print(buf);
+    if (fres != FR_OK) {
+        uart_print("FAIL: Could not open W0.TXT.\r\n");
+        return;
+    }
+
+    snprintf(buf, sizeof(buf), "File size = %lu bytes\r\n", (unsigned long)f_size(&file));
+    uart_print(buf);
+
+    uart_print("About to call f_read for 128 bytes...\r\n");
+
+    memset(buf, 0, sizeof(buf));
+    fres = f_read(&file, buf, 128, &br);
+
+    uart_print("Returned from f_read.\r\n");
+
+    {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "f_read result = %u, bytes read = %u\r\n", fres, br);
+        uart_print(msg);
+    }
+
+    if (fres == FR_OK && br > 0) {
+        buf[br] = '\0';
+        uart_print("\r\nFirst 128 bytes:\r\n");
+        uart_print("----------------------------------------\r\n");
+        uart_print(buf);
+        uart_print("\r\n----------------------------------------\r\n");
+    }
+
+    f_close(&file);
+    uart_print("PASS: W0.TXT read test complete.\r\n");
+}
+
+static void fatfs_parse_w0_first_line_test(void) {
+    FIL file;
+    FRESULT fres;
+    UINT br = 0;
+    char c;
+    char line[160];
+    char buf[256];
+    uint32_t idx = 0;
+    static FATFS fs;
+
+    char time_str[32];
+    int ax, ay, az, gx, gy, gz;
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("FATFS PARSE W0.TXT FIRST LINE TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    fres = f_mount(&fs, "", 1);
+    snprintf(buf, sizeof(buf), "f_mount result = %u\r\n", fres);
+    uart_print(buf);
+    if (fres != FR_OK) {
+        uart_print("FAIL: Mount failed.\r\n");
+        return;
+    }
+
+    fres = f_open(&file, "W0.TXT", FA_READ);
+    snprintf(buf, sizeof(buf), "f_open W0.TXT result = %u\r\n", fres);
+    uart_print(buf);
+
+    if (fres != FR_OK) {
+        uart_print("FAIL: Could not open W0.TXT.\r\n");
+        return;
+    }
+
+    uart_print("Reading first line character-by-character...\r\n");
+    memset(line, 0, sizeof(line));
+
+    while (idx < sizeof(line) - 1U) {
+        fres = f_read(&file, &c, 1, &br);
+        if (fres != FR_OK || br == 0U) break;
+        if (c == '\n' || c == '\r') break;
+        line[idx++] = c;
+    }
+    line[idx] = '\0';
+
+    f_close(&file);
+
+    uart_print("First line read:\r\n");
+    uart_print(line);
+    uart_print("\r\n");
+
+    int parsed = sscanf(line, "%31[^,], %d, %d, %d, %d, %d, %d",
+                        time_str, &ax, &ay, &az, &gx, &gy, &gz);
+
+    snprintf(buf, sizeof(buf), "sscanf parsed fields = %d\r\n", parsed);
+    uart_print(buf);
+
+    if (parsed == 7) {
+        snprintf(buf, sizeof(buf),
+                 "Parsed values:\r\n"
+                 "  time = %s\r\n"
+                 "  ax   = %d\r\n"
+                 "  ay   = %d\r\n"
+                 "  az   = %d\r\n"
+                 "  gx   = %d\r\n"
+                 "  gy   = %d\r\n"
+                 "  gz   = %d\r\n",
+                 time_str, ax, ay, az, gx, gy, gz);
+        uart_print(buf);
+        uart_print("PASS: First line parsed successfully.\r\n");
+    } else {
+        uart_print("FAIL: Could not parse first line.\r\n");
+    }
+}
+
 static void sd_fatfs_mount_write_test(void) {
     FATFS fs;
     FIL file;
@@ -1139,7 +1269,9 @@ int main(void)
 
   HAL_Delay(500);
 
-  test_fatfs_list_files();
+  // test_fatfs_list_files();
+  // test_fatfs_read_w0_small_preview();
+  fatfs_parse_w0_first_line_test();
 
   /* USER CODE END 2 */
 
