@@ -112,56 +112,124 @@ static void uart_print(const char *s)
     HAL_UART_Transmit(&hlpuart1, (uint8_t*)s, strlen(s), HAL_MAX_DELAY);
 }
 
-/* --- SD Card SPI CMD0 test functions --- */
-static uint8_t sd_spi_txrx(uint8_t tx) {
+static uint8_t sd_spi_txrx(uint8_t data) {
     uint8_t rx = 0xFF;
-    HAL_SPI_TransmitReceive(&hspi1, &tx, &rx, 1, HAL_MAX_DELAY);
+    HAL_SPI_TransmitReceive(&hspi1, &data, &rx, 1, HAL_MAX_DELAY);
     return rx;
 }
 
 static void sd_cs_high(void) {
     HAL_GPIO_WritePin(SD_CS_GPIO_Port, SD_CS_Pin, GPIO_PIN_SET);
+    sd_spi_txrx(0xFF);
 }
 
 static void sd_cs_low(void) {
     HAL_GPIO_WritePin(SD_CS_GPIO_Port, SD_CS_Pin, GPIO_PIN_RESET);
-}
-
-static void sd_dummy_clocks(uint16_t nbytes) {
-    for (uint16_t i = 0; i < nbytes; i++) {
-        sd_spi_txrx(0xFF);
-    }
-}
-
-static uint8_t sd_send_cmd0(void) {
-    uint8_t r1 = 0xFF;
-
-    sd_cs_high();
-    HAL_Delay(10);
-
-    /* At least 74 clock pulses with CS high */
-    sd_dummy_clocks(10);
-
-    sd_cs_low();
-    HAL_Delay(1);
-
-    /* CMD0: GO_IDLE_STATE */
-    sd_spi_txrx(0x40);
-    sd_spi_txrx(0x00);
-    sd_spi_txrx(0x00);
-    sd_spi_txrx(0x00);
-    sd_spi_txrx(0x00);
-    sd_spi_txrx(0x95);
-
-    for (uint8_t i = 0; i < 10; i++) {
-        r1 = sd_spi_txrx(0xFF);
-        if (r1 != 0xFF) break;
-    }
-
-    sd_cs_high();
     sd_spi_txrx(0xFF);
+}
 
-    return r1;
+static void sd_send_dummy_clocks(void) {
+    sd_cs_high();
+    for (int i = 0; i < 10; i++) sd_spi_txrx(0xFF);
+}
+
+static uint8_t sd_send_cmd(uint8_t cmd, uint32_t arg, uint8_t crc) {
+    uint8_t r1;
+    sd_cs_low();
+    sd_spi_txrx(0x40 | cmd);
+    sd_spi_txrx((uint8_t)(arg >> 24));
+    sd_spi_txrx((uint8_t)(arg >> 16));
+    sd_spi_txrx((uint8_t)(arg >> 8));
+    sd_spi_txrx((uint8_t)(arg));
+    sd_spi_txrx(crc);
+    for (int i = 0; i < 10; i++) {
+        r1 = sd_spi_txrx(0xFF);
+        if ((r1 & 0x80) == 0) return r1;
+    }
+    return 0xFF;
+}
+
+static void sd_card_spi_full_init_test(void) {
+    char buf[256];
+    uint8_t r1;
+    uint8_t r7[4];
+    uint8_t ocr[4];
+
+    uart_print("\r\n============================================================\r\n");
+    uart_print("SD CARD SPI FULL INITIALISATION TEST\r\n");
+    uart_print("============================================================\r\n");
+
+    sd_send_dummy_clocks();
+
+    r1 = sd_send_cmd(0, 0x00000000, 0x95);
+    snprintf(buf, sizeof(buf), "CMD0 response  = 0x%02X\r\n", r1);
+    uart_print(buf);
+    sd_cs_high();
+
+    if (r1 != 0x01) {
+        uart_print("FAIL: CMD0 did not return idle state.\r\n");
+        return;
+    }
+
+    r1 = sd_send_cmd(8, 0x000001AA, 0x87);
+    r7[0] = sd_spi_txrx(0xFF);
+    r7[1] = sd_spi_txrx(0xFF);
+    r7[2] = sd_spi_txrx(0xFF);
+    r7[3] = sd_spi_txrx(0xFF);
+    snprintf(buf, sizeof(buf),
+             "CMD8 response  = 0x%02X  R7 = [%02X %02X %02X %02X]\r\n",
+             r1, r7[0], r7[1], r7[2], r7[3]);
+    uart_print(buf);
+    sd_cs_high();
+
+    if (r1 != 0x01 || r7[2] != 0x01 || r7[3] != 0xAA) {
+        uart_print("FAIL: CMD8 voltage or check pattern not correct.\r\n");
+        return;
+    }
+
+    uint32_t timeout = 0;
+    do {
+        r1 = sd_send_cmd(55, 0x00000000, 0xFF);
+        sd_cs_high();
+        r1 = sd_send_cmd(41, 0x40000000, 0xFF);
+        sd_cs_high();
+        timeout++;
+        HAL_Delay(10);
+    } while ((r1 != 0x00) && (timeout < 500));
+
+    snprintf(buf, sizeof(buf), "ACMD41 response = 0x%02X after %lu tries\r\n",
+             r1, (unsigned long)timeout);
+    uart_print(buf);
+
+    if (r1 != 0x00) {
+        uart_print("FAIL: Card did not leave idle state during ACMD41.\r\n");
+        return;
+    }
+
+    r1 = sd_send_cmd(58, 0x00000000, 0xFF);
+    ocr[0] = sd_spi_txrx(0xFF);
+    ocr[1] = sd_spi_txrx(0xFF);
+    ocr[2] = sd_spi_txrx(0xFF);
+    ocr[3] = sd_spi_txrx(0xFF);
+    sd_cs_high();
+
+    snprintf(buf, sizeof(buf),
+             "CMD58 response = 0x%02X  OCR = [%02X %02X %02X %02X]\r\n",
+             r1, ocr[0], ocr[1], ocr[2], ocr[3]);
+    uart_print(buf);
+
+    if (r1 != 0x00) {
+        uart_print("FAIL: CMD58 failed.\r\n");
+        return;
+    }
+
+    if (ocr[0] & 0x40) {
+        uart_print("Card type: SDHC/SDXC block-addressed.\r\n");
+    } else {
+        uart_print("Card type: SDSC byte-addressed.\r\n");
+    }
+
+    uart_print("PASS: SD card fully initialised in SPI mode.\r\n");
 }
 
 static void test_full_pipeline_mean_removal(void)
@@ -780,27 +848,8 @@ int main(void)
   /* USER CODE BEGIN 2 */
   char buf[256];
 
-  uart_print("\r\n============================================================\r\n");
-  uart_print("SD CARD SPI CMD0 TEST\r\n");
-  uart_print("============================================================\r\n");
+  sd_card_spi_full_init_test();
 
-  HAL_Delay(500);
-
-  uint8_t r1 = sd_send_cmd0();
-
-  snprintf(buf, sizeof(buf), "CMD0 response = 0x%02X\r\n", r1);
-  uart_print(buf);
-
-  if (r1 == 0x01) {
-    uart_print("PASS: SD card responded to CMD0. SPI wiring and CS are working.\r\n");
-  } else if (r1 == 0xFF) {
-    uart_print("FAIL: No response from SD card. Check power, GND, MISO/MOSI/SCK/CS wiring.\r\n");
-  } else {
-    snprintf(buf, sizeof(buf), "CHECK: SD card responded with 0x%02X (expected 0x01).\r\n", r1);
-    uart_print(buf);
-  }
-
-  uart_print("SD CMD0 TEST COMPLETE.\r\n");
   /* USER CODE END 2 */
 
   /* Infinite loop */
