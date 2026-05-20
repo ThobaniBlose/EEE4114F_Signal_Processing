@@ -1,119 +1,78 @@
-# SHARC Wave Parameter Processor — STM32 Embedded DSP Subsystem
+# SHARC Wave Parameter Processor
 
-Embedded signal processing subsystem for the SHARC (Smart Heave And Roll Characteriser) wave measurement buoy. Runs on the STM32L4R5ZI (NUCLEO-L4R5ZI-P) and computes non-directional and directional wave parameters from IMU acceleration data.
+Embedded signal processing subsystem for the SHARC wave measurement buoy. This runs on the STM32L4R5ZI and computes wave height, period, and direction from raw IMU acceleration data.
 
-## What It Does
+## Overview
 
-Processes raw 3-axis accelerometer data (100 Hz, in g) and produces a complete wave measurement output:
+The processor takes 3-axis accelerometer data sampled at 100 Hz and outputs a compact measurement packet containing significant wave height (Hm0), peak period (Tp), mean periods (Tm01, Tm02), wave direction, and quality indicators. It automatically detects whether heading information is available and selects the appropriate processing mode.
 
-```
-T1,S001,UTC=NO_GPS,GPS=0,LAT=nan,LON=nan,
-Hm0=1.014,Tp=18.204,Tm01=16.606,Tm02=16.373,
-DIR=18.9,REF=BODY_RELATIVE,Q=1,R1=0.681,COH=0.398
-```
+Example output:
 
-## Processing Pipeline
+    T1,S001,UTC=NO_GPS,GPS=0,LAT=nan,LON=nan,Hm0=1.014,Tp=18.204,
+    Tm01=16.606,Tm02=16.373,DIR=18.9,REF=BODY_RELATIVE,Q=1,R1=0.681,COH=0.398
 
-```
-IMU CSV (ax, ay, az in g)
-    ↓
-Mean removal + g → m/s² conversion
-    ↓
-Butterworth bandpass filtfilt (0.02–0.50 Hz, SOS biquad cascade)
-    ↓
-Trapezoidal integration → velocity
-    ↓
-High-pass filtfilt (0.02 Hz) → drift suppression
-    ↓
-Integration → displacement (eta)
-    ↓
-High-pass filtfilt → clean eta
-    ↓
-Welch PSD (win=8192, nfft=16384) → Hm0, Tp, Tm01, Tm02
-    ↓
-Cross-spectral direction estimation → mean direction, r1, coherence
-    ↓
-Automatic mode decision + Tier-1 packet output
-```
+## How It Works
 
-## Validation Results
+The processing chain converts raw acceleration into wave parameters through these stages:
 
-Validated against MATLAB golden reference (S001_IMU.csv truncated replay segment):
+1. Convert acceleration from g to m/s squared and remove the mean (gravity)
+2. Bandpass filter the dynamic acceleration (0.02 to 0.50 Hz) using a forward-backward Butterworth filter implemented as second-order sections
+3. Integrate filtered acceleration to get velocity, then high-pass filter to suppress drift
+4. Integrate velocity to get surface displacement (eta), high-pass filter again
+5. Compute the displacement power spectrum using Welch's method and extract Hm0, Tp, Tm01, Tm02 from spectral moments
+6. Compute cross-spectra between eta and horizontal velocity channels to estimate wave direction, spreading (r1), and coherence
+7. Format a Tier-1 output packet
 
-| Parameter | STM32 | MATLAB | Error |
-|-----------|--------|--------|-------|
-| Hm0 | 1.013655 m | 1.013638 m | 0.002% |
-| Tp | 18.204445 s | 18.204444 s | 0.000% |
-| Tm01 | 16.606028 s | 16.606034 s | 0.000% |
-| Tm02 | 16.372871 s | 16.372861 s | 0.000% |
-| Direction | 18.940° | 18.940° | <0.001° |
-| r1 band | 0.6814 | 0.6814 | <0.001 |
+## Validation
 
-## Acceptance Test Results
+The STM32 implementation was validated against a MATLAB golden reference using a truncated segment from real ocean data (S001_IMU.csv, WS23 dataset). All wave parameters match to better than 0.01 percent. The directional output was verified using synthetic test cases with known incoming wave direction.
 
-| Test | Description | Result |
-|------|-------------|--------|
-| ATP3 | Body-to-North/East rotation (5 cases) | All errors < 0.000001 |
-| ATP4A | Geographic peak-bin direction | Error: 0.000011° |
-| ATP4B | Band-integrated direction (0.08–0.40 Hz) | Error: 0.000029° |
+Key results:
 
-## Project Structure
+- Hm0 error: 0.002 percent
+- Tp error: less than 0.001 percent
+- Direction error on synthetic cases: less than 0.001 degrees
+- Body-to-Earth frame rotation error: less than 0.000001 on all test cases
 
-```
-Core/Inc/
-  sharc_process.h         — Single-pass window processor API
-  wave_full_pipeline.h    — Filter coefficients, SOS, integration, filtfilt
-  wave_mode.h             — Mode decision (GEOGRAPHIC/BODY_RELATIVE/FALLBACK)
-  wave_packet.h           — Tier-1 output packet formatter
-  wave_types.h            — Shared enums
-  direction_processor.h   — Body→Earth frame rotation
-  csv_imu_reader.h        — CSV parser for sensing subsystem format
-  wave_processor.h        — Legacy Welch PSD processor (acceleration-domain)
-  s001_replay_segment.h   — Real S001_IMU.csv replay data (32768 samples)
+## Processing Modes
 
-Core/Src/
-  sharc_process.c         — Production single-pass processor
-  wave_full_pipeline.c    — SOS filtfilt, cumtrapz, cross-spectra
-  wave_mode.c             — Automatic mode decision from data
-  wave_packet.c           — Tier-1 ASCII packet formatter
-  direction_processor.c   — Heading-based frame rotation
-  csv_imu_reader.c        — CSV parser with pluggable line source
-  wave_processor.c        — Legacy acceleration-domain processor
-  s001_replay_segment.c   — Replay data arrays (all 13 IMU columns)
-  main.c                  — Test harness + ATP validation
-```
+The system decides its mode automatically by scanning the input data:
+
+- Geographic mode: all sensor channels valid including heading and magnetometer. Produces Earth-referenced wave direction.
+- Body-relative mode: motion data valid but heading or magnetometer missing. Produces direction relative to the buoy body frame.
+- Fallback mode: motion data itself is unusable. Produces vertical-only wave parameters with no direction.
+
+## Project Files
+
+The main processing modules are in Core/Inc and Core/Src:
+
+- sharc_process: the single-pass window processor that runs the full pipeline
+- wave_full_pipeline: filter coefficients, SOS filtfilt, integration, cross-spectral DFT
+- wave_mode: automatic mode decision logic
+- wave_packet: Tier-1 output packet formatter
+- direction_processor: body-frame to Earth-frame rotation
+- csv_imu_reader: CSV parser for the sensing subsystem data format
+- s001_replay_segment: real ocean data replay arrays for validation
 
 ## Hardware
 
-- **MCU:** STM32L4R5ZIT6P (Cortex-M4, 120 MHz, 640 KB RAM, 2 MB Flash)
-- **Board:** NUCLEO-L4R5ZI-P
-- **Debug output:** LPUART1 via ST-LINK VCP (115200 8N1)
-- **FPU:** Hardware single-precision + software double for filter state
+- MCU: STM32L4R5ZIT6P (Cortex-M4, 640 KB RAM, 2 MB Flash)
+- Board: NUCLEO-L4R5ZI-P
+- Debug output: LPUART1 via ST-LINK virtual COM port at 115200 baud
+- FPU: hardware single-precision, with double-precision used for filter state variables
 
-## Build
+## Design Notes
 
-Open in STM32CubeIDE. Only GPIO and LPUART1 peripherals are enabled. Build the Debug configuration.
+- IIR filters use second-order sections (biquad cascade) for numerical stability in single precision
+- The filtfilt implementation uses reflection padding and approximate initial conditions to match MATLAB output to seven significant figures
+- Cross-spectral DFT uses a recursive trig oscillator to avoid calling cos/sin on every sample
+- Memory is managed carefully: eta is stored once, horizontal channels are computed sequentially reusing a single buffer
+- No external DSP library dependency. The implementation is pure C and portable.
 
-## Mode Decision Logic
+## Building
 
-The processor automatically selects the processing mode from the data:
-
-- **GEOGRAPHIC:** heading, roll, pitch, and magnetometer all valid → full Earth-frame direction
-- **BODY_RELATIVE:** motion valid but heading/mag missing → body-frame relative direction
-- **FALLBACK:** motion data unusable → vertical-only (no direction)
-
-## Key Design Decisions
-
-- **SOS biquad cascade** for IIR filters — numerically stable in single precision
-- **Reflection padding + initial conditions** for filtfilt — matches MATLAB to 7 significant figures
-- **Recursive trig oscillator** for DFT — eliminates per-sample cos/sin calls
-- **Memory-efficient cross-spectra** — eta stored once, vx/vy computed sequentially reusing one buffer
-- **No CMSIS-DSP dependency** — pure C implementation, portable
-
-## Reference Algorithm
-
-`PIPE_2GNSS_Wave_Direction.m` — MATLAB golden reference algorithm for the full directional wave processing pipeline.
+Open the project in STM32CubeIDE and build the Debug configuration. Only GPIO and LPUART1 are enabled for the validation build. The SD card integration branch adds SPI1 and FATFS.
 
 ## Author
 
-Thoba — EEE4114F Signal Processing, University of Cape Town, 2026
+Thobani Blose, EEE4114F Signal Processing Subsystem, University of Cape Town, 2026.
