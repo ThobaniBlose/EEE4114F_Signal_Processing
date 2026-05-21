@@ -22,8 +22,11 @@
  * buf_a: primary working buffer (reused for each channel)
  * buf_eta: stores eta for cross-spectral computation
  * --------------------------------------------------------------------------- */
-float s_buf_a[32768U + 2U * WFP_FILTFILT_PAD_BP];
-float s_buf_eta[32768U + 2U * WFP_FILTFILT_PAD_BP];
+#define SHARC_PROCESS_MAX_SAMPLES  15000U
+#define SHARC_PROCESS_PAD_SAMPLES  (2U * WFP_FILTFILT_PAD_BP)
+
+float s_buf_a[SHARC_PROCESS_MAX_SAMPLES + SHARC_PROCESS_PAD_SAMPLES];
+float s_buf_eta[SHARC_PROCESS_MAX_SAMPLES + SHARC_PROCESS_PAD_SAMPLES];
 
 /* Cross-spectral bin accumulators */
 static WfpCrossBin_t s_eta_x_bins[WFP_WAVE_N_BINS];
@@ -153,6 +156,7 @@ int sharc_process_window(const float *ax_g,
 {
     if (!ax_g || !ay_g || !az_g || !result) return -1;
     if (n_samples < WFP_WELCH_WIN_LEN) return -2;
+    if (n_samples > SHARC_PROCESS_MAX_SAMPLES) return -3;
 
     memset(result, 0, sizeof(SharcResult_t));
     result->n_samples = n_samples;
